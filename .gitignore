@@ -1,0 +1,14 @@
+# Python bytecode and test caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# Local sample/generated motion data
+test_data/
+
+# SMPL-X model binaries
+assets/body_models/smplx/*.npz
+assets/body_models/smplx/*.pkl
+assets/body_models/smplx/*.pt
+assets/body_models/smplx/*.pth

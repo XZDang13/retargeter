@@ -1,0 +1,26 @@
+robot_config: retargeter/newton/configs/g1_23_robot.yaml
+scaler_config: retargeter/scale/configs/g1_23_scaler.yaml
+target_config: retargeter/scale/configs/g1_23_stage1_targets.yaml
+
+solver:
+  iterations:
+    stage1a: 24
+    stage1b: 24
+  step_size: 1.0
+  optimizer: lm
+  jacobian_mode: analytic
+  lambda_initial: 0.1
+  fallback_on_failure: true
+
+objectives:
+  joint_limit_weight: 10.0
+  posture_weight: 0.05
+  smooth_weight: 5.5
+  damping_weight: 0.0
+
+postprocess:
+  clamp_joint_limits: true
+  clamp_velocity: true
+  velocity_limit_scale: 1.0
+  feet_stabilization:
+    enabled: false

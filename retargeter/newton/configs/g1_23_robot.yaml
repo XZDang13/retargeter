@@ -1,0 +1,113 @@
+robot: unitree_g1_23
+model:
+  path: assets/robots/unitree_g1/g1_23_dof_rubber_hand/g1_23dof.usda
+  format: usd
+  floating_base: true
+root_body: pelvis
+
+body_names:
+  - pelvis
+  - left_hip_pitch_link
+  - left_hip_roll_link
+  - left_hip_yaw_link
+  - left_knee_link
+  - left_ankle_pitch_link
+  - left_ankle_roll_link
+  - right_hip_pitch_link
+  - right_hip_roll_link
+  - right_hip_yaw_link
+  - right_knee_link
+  - right_ankle_pitch_link
+  - right_ankle_roll_link
+  - torso_link
+  - left_shoulder_pitch_link
+  - left_shoulder_roll_link
+  - left_shoulder_yaw_link
+  - left_elbow_link
+  - left_wrist_roll
+  - left_rubber_hand_link
+  - right_shoulder_pitch_link
+  - right_shoulder_roll_link
+  - right_shoulder_yaw_link
+  - right_elbow_link
+  - right_wrist_roll
+  - right_rubber_hand_link
+
+actuated_joints:
+  - left_hip_pitch_joint
+  - left_hip_roll_joint
+  - left_hip_yaw_joint
+  - left_knee_joint
+  - left_ankle_pitch_joint
+  - left_ankle_roll_joint
+  - right_hip_pitch_joint
+  - right_hip_roll_joint
+  - right_hip_yaw_joint
+  - right_knee_joint
+  - right_ankle_pitch_joint
+  - right_ankle_roll_joint
+  - waist_yaw_joint
+  - left_shoulder_pitch_joint
+  - left_shoulder_roll_joint
+  - left_shoulder_yaw_joint
+  - left_elbow_joint
+  - left_wrist_roll_joint
+  - right_shoulder_pitch_joint
+  - right_shoulder_roll_joint
+  - right_shoulder_yaw_joint
+  - right_elbow_joint
+  - right_wrist_roll_joint
+
+joint_limits_deg:
+  left_hip_pitch_joint: [-144.99843, 165.00038]
+  left_hip_roll_joint: [-30.00007, 170.0023]
+  left_hip_yaw_joint: [-157.99884, 157.99884]
+  left_knee_joint: [-5.000031, 165.00038]
+  left_ankle_pitch_joint: [-50.00031, 30.00007]
+  left_ankle_roll_joint: [-15.000035, 15.000035]
+  right_hip_pitch_joint: [-144.99843, 165.00038]
+  right_hip_roll_joint: [-170.0023, 30.00007]
+  right_hip_yaw_joint: [-157.99884, 157.99884]
+  right_knee_joint: [-5.000031, 165.00038]
+  right_ankle_pitch_joint: [-50.00031, 30.00007]
+  right_ankle_roll_joint: [-15.000035, 15.000035]
+  waist_yaw_joint: [-150.00035, 150.00035]
+  left_shoulder_pitch_joint: [-176.99812, 153.00266]
+  left_shoulder_roll_joint: [-90.997154, 129.00145]
+  left_shoulder_yaw_joint: [-150.00035, 150.00035]
+  left_elbow_joint: [-60.00014, 120.00028]
+  left_wrist_roll_joint: [-112.999886, 112.999886]
+  right_shoulder_pitch_joint: [-176.99812, 153.00266]
+  right_shoulder_roll_joint: [-129.00145, 90.997154]
+  right_shoulder_yaw_joint: [-150.00035, 150.00035]
+  right_elbow_joint: [-60.00014, 120.00028]
+  right_wrist_roll_joint: [-112.999886, 112.999886]
+
+velocity_limits_rad_s:
+  default: 20.0
+  joints: {}
+
+default_joint_pos:
+  left_hip_pitch_joint: 0.0
+  left_hip_roll_joint: 0.0
+  left_hip_yaw_joint: 0.0
+  left_knee_joint: 0.0
+  left_ankle_pitch_joint: 0.0
+  left_ankle_roll_joint: 0.0
+  right_hip_pitch_joint: 0.0
+  right_hip_roll_joint: 0.0
+  right_hip_yaw_joint: 0.0
+  right_knee_joint: 0.0
+  right_ankle_pitch_joint: 0.0
+  right_ankle_roll_joint: 0.0
+  waist_yaw_joint: 0.0
+  left_shoulder_pitch_joint: 0.0
+  left_shoulder_roll_joint: 0.0
+  left_shoulder_yaw_joint: 0.0
+  left_elbow_joint: 0.0
+  left_wrist_roll_joint: 0.0
+  right_shoulder_pitch_joint: 0.0
+  right_shoulder_roll_joint: 0.0
+  right_shoulder_yaw_joint: 0.0
+  right_elbow_joint: 0.0
+  right_wrist_roll_joint: 0.0

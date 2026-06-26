@@ -1,0 +1,7 @@
+fps: 30
+viewer: file
+port: 8080
+share: false
+loop: false
+realtime: false
+replay_name: newton_replay.json

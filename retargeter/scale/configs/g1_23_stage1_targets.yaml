@@ -1,0 +1,99 @@
+stage1a:
+  pelvis:
+    pos_weight: 100.0
+    rot_weight: 10.0
+  left_hip:
+    pos_weight: 0.0
+    rot_weight: 10.0
+  left_knee:
+    pos_weight: 0.0
+    rot_weight: 10.0
+  left_ankle:
+    pos_weight: 50.0
+    rot_weight: 0.0
+  right_hip:
+    pos_weight: 0.0
+    rot_weight: 10.0
+  right_knee:
+    pos_weight: 0.0
+    rot_weight: 10.0
+  right_ankle:
+    pos_weight: 50.0
+    rot_weight: 0.0
+  chest:
+    pos_weight: 0.0
+    rot_weight: 10.0
+  left_shoulder:
+    pos_weight: 0.0
+    rot_weight: 10.0
+  left_elbow:
+    pos_weight: 0.0
+    rot_weight: 10.0
+  left_hand:
+    pos_weight: 0.0
+    rot_weight: 10.0
+  right_shoulder:
+    pos_weight: 0.0
+    rot_weight: 10.0
+  right_elbow:
+    pos_weight: 0.0
+    rot_weight: 10.0
+  right_hand:
+    pos_weight: 0.0
+    rot_weight: 10.0
+
+stage1b:
+  pelvis:
+    pos_weight: 100.0
+    rot_weight: 5.0
+  left_hip:
+    pos_weight: 10.0
+    rot_weight: 5.0
+  left_knee:
+    pos_weight: 10.0
+    rot_weight: 5.0
+  left_ankle:
+    pos_weight: 50.0
+    rot_weight: 0.0
+  right_hip:
+    pos_weight: 10.0
+    rot_weight: 5.0
+  right_knee:
+    pos_weight: 10.0
+    rot_weight: 5.0
+  right_ankle:
+    pos_weight: 50.0
+    rot_weight: 0.0
+  chest:
+    pos_weight: 0.0
+    rot_weight: 10.0
+  left_shoulder:
+    pos_weight: 10.0
+    rot_weight: 5.0
+  left_elbow:
+    pos_weight: 10.0
+    rot_weight: 5.0
+  left_hand:
+    pos_weight: 10.0
+    rot_weight: 5.0
+  right_shoulder:
+    pos_weight: 10.0
+    rot_weight: 5.0
+  right_elbow:
+    pos_weight: 10.0
+    rot_weight: 5.0
+  right_hand:
+    pos_weight: 10.0
+    rot_weight: 5.0
+
+contact_weight_modulation:
+  enabled: true
+  regions:
+    left_foot:
+      target: left_ankle
+      extra_pos_weight: 10.0
+      extra_rot_weight: 0.0
+    right_foot:
+      target: right_ankle
+      extra_pos_weight: 10.0
+      extra_rot_weight: 0.0

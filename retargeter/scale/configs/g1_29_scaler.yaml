@@ -1,0 +1,137 @@
+robot: unitree_g1_29
+human_root_name: pelvis
+robot_root_name: pelvis
+human_height_assumption: 1.8
+model_height: 1.70
+
+scales:
+  pelvis: 0.90
+  chest: 0.90
+  head: 0.90
+  left_hip: 0.90
+  right_hip: 0.90
+  left_knee: 0.90
+  right_knee: 0.90
+  left_ankle: 0.90
+  right_ankle: 0.90
+  left_foot: 0.90
+  right_foot: 0.90
+  left_toe: 0.90
+  right_toe: 0.90
+  left_heel: 0.90
+  right_heel: 0.90
+  left_shoulder: 0.80
+  right_shoulder: 0.80
+  left_elbow: 0.80
+  right_elbow: 0.80
+  left_hand: 0.80
+  right_hand: 0.80
+
+parents:
+  pelvis: null
+  chest: pelvis
+  head: chest
+  left_hip: pelvis
+  right_hip: pelvis
+  left_knee: left_hip
+  right_knee: right_hip
+  left_ankle: left_knee
+  right_ankle: right_knee
+  left_foot: left_ankle
+  right_foot: right_ankle
+  left_toe: left_foot
+  right_toe: right_foot
+  left_heel: left_foot
+  right_heel: right_foot
+  left_shoulder: chest
+  right_shoulder: chest
+  left_elbow: left_shoulder
+  right_elbow: right_shoulder
+  left_hand: left_elbow
+  right_hand: right_elbow
+
+body_map:
+  pelvis:
+    human: pelvis
+    robot: pelvis
+  chest:
+    human: chest
+    robot: torso_link
+  left_hand:
+    human: left_hand
+    robot: left_wrist_yaw_link
+  right_hand:
+    human: right_hand
+    robot: right_wrist_yaw_link
+  left_shoulder:
+    human: left_shoulder
+    robot: left_shoulder_yaw_link
+  right_shoulder:
+    human: right_shoulder
+    robot: right_shoulder_yaw_link
+  left_elbow:
+    human: left_elbow
+    robot: left_elbow_link
+  right_elbow:
+    human: right_elbow
+    robot: right_elbow_link
+  left_hip:
+    human: left_hip
+    robot: left_hip_roll_link
+  right_hip:
+    human: right_hip
+    robot: right_hip_roll_link
+  left_ankle:
+    human: left_ankle
+    robot: left_ankle_roll_link
+  right_ankle:
+    human: right_ankle
+    robot: right_ankle_roll_link
+  left_knee:
+    human: left_knee
+    robot: left_knee_link
+  right_knee:
+    human: right_knee
+    robot: right_knee_link
+
+offsets:
+  pelvis: [0.0, 0.0, 0.0]
+  chest: [0.0, 0.0, 0.0]
+  head: [0.0, 0.0, 0.0]
+  left_hip: [0.0, 0.0, 0.0]
+  right_hip: [0.0, 0.0, 0.0]
+  left_knee: [0.0, 0.0, 0.0]
+  right_knee: [0.0, 0.0, 0.0]
+  left_ankle: [0.0, 0.0, 0.0]
+  right_ankle: [0.0, 0.0, 0.0]
+  left_foot: [0.0, 0.0, 0.0]
+  right_foot: [0.0, 0.0, 0.0]
+  left_toe: [0.0, 0.0, 0.0]
+  right_toe: [0.0, 0.0, 0.0]
+  left_shoulder: [0.0, 0.0, 0.0]
+  right_shoulder: [0.0, 0.0, 0.0]
+  left_elbow: [0.0, 0.0, 0.0]
+  right_elbow: [0.0, 0.0, 0.0]
+  left_hand: [0.0, 0.0, 0.0]
+  right_hand: [0.0, 0.0, 0.0]
+
+rotation_offsets_xyzw:
+  pelvis: [-0.5, -0.5, -0.5, 0.5]
+  chest: [-0.5, -0.5, -0.5, 0.5]
+  head: [0.5, 0.5, 0.5, 0.5]
+  left_hip: [-0.563793, -0.563793, -0.426776, 0.426776]
+  right_hip: [-0.563793, -0.563793, -0.426776, 0.426776]
+  left_knee: [-0.5, -0.5, -0.5, 0.5]
+  right_knee: [-0.5, -0.5, -0.5, 0.5]
+  left_ankle: [-0.5, -0.5, -0.5, 0.5]
+  right_ankle: [-0.5, -0.5, -0.5, 0.5]
+  left_foot: [-0.5, -0.5, -0.5, 0.5]
+  right_foot: [-0.5, -0.5, -0.5, 0.5]
+  left_toe: [0.703, -0.074, -0.074, 0.703]
+  right_toe: [0.074, 0.703, 0.703, 0.074]
+  left_shoulder: [0.0, -0.707107, 0.0, 0.707107]
+  right_shoulder: [0.707107, 0.0, 0.707107, 0.0]
+  left_elbow: [0.0, 0.0, 0.0, 1.0]
+  right_elbow: [0.0, 0.0, -1.0, 0.0]
+  left_hand: [0.0, 0.0, 0.0, 1.0]
+  right_hand: [0.0, 0.0, -1.0, 0.0]
