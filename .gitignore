@@ -6,6 +6,7 @@ __pycache__/
 
 # Local sample/generated motion data
 test_data/
+outputs/
 
 # SMPL-X model binaries
 assets/body_models/smplx/*.npz

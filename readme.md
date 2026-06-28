@@ -6,8 +6,8 @@ The current implementation is a practical baseline. It supports preprocessing SM
 
 ## Supported Robots
 
-- `unitree_g1_29` / `g1_29`: 29 actuated joints, backed by `assets/robots/unitree_g1/g1_29_dof_rubber_hand/g1_29dof.usda`
-- `unitree_g1_23` / `g1_23`: 23 actuated joints, backed by `assets/robots/unitree_g1/g1_23_dof_rubber_hand/g1_23dof.usda`
+- `unitree_g1_29` / `g1_29`: 29 actuated joints, backed by `assets/robots/unitree_g1/g1_29_dof/g1_mocap.usda`
+- `unitree_g1_23` / `g1_23`: 23 actuated joints, backed by `assets/robots/unitree_g1/g1_23_dof/g1_23dof.usda`
 
 Robot specs, joint limits, velocity limits, and default poses live in:
 
@@ -97,6 +97,21 @@ PYTHONPATH=. python -m retargeter.cli.retarget_stage1 \
   --newton-viewer file
 ```
 
+To replay the robot beside the source SMPL-X mesh later, also export the preprocessed canonical human motion:
+
+```bash
+PYTHONPATH=. python -m retargeter.cli.retarget_stage1 \
+  --input test_data/05_01_stageii.npz \
+  --model-type smplx \
+  --smpl-model-dir assets/body_models \
+  --robot g1_23 \
+  --output outputs/05_01_g1_23 \
+  --human-output outputs/05_01_g1_23/human.npz \
+  --visualize 0
+```
+
+`--human-output` requires real SMPL/SMPL-X input with vertices. Do not combine it with `--input mock` or `--no-vertices`.
+
 For PHUMA-style `.npy` files, pass FPS explicitly:
 
 ```bash
@@ -165,6 +180,16 @@ retargeter/scale/configs/g1_23_stage1_targets.yaml
 
 `quality.json` records frame count, success count, success ratio, max absolute joint velocity, and per-frame diagnostics.
 
+An optional human replay `.npz` from `--human-output` contains:
+
+- `fps`: scalar human motion FPS
+- `body_names`: canonical 21-body human names
+- `body_pos_w`: `[T, 21, 3]`
+- `body_quat_xyzw`: `[T, 21, 4]`
+- `vertices_w`: `[T, V, 3]` SMPL/SMPL-X mesh vertices
+- `mesh_faces`: `[F, 3]` mesh triangle indices
+- Optional contact diagnostics used by plot mode
+
 ## Visualization
 
 Replay an exported Stage 1 motion:
@@ -185,6 +210,22 @@ Viewer choices:
 - `viser`: starts Newton ViewerViser
 - `gl`: starts Newton ViewerGL
 - `null`: headless replay smoke test
+
+Replay the robot and the source SMPL-X mesh side by side:
+
+```bash
+PYTHONPATH=. python -m retargeter.cli.visualize_stage1 \
+  --stage1 outputs/05_01_g1_23/motion.npz \
+  --human outputs/05_01_g1_23/human.npz \
+  --robot-spec retargeter/newton/configs/g1_23_robot.yaml \
+  --output outputs/05_01_g1_23/overlay_gl \
+  --mode replay \
+  --viewer gl \
+  --human-offset 0,1.25,0 \
+  --realtime 1
+```
+
+Human overlay is optional. Without `--human`, replay only renders the robot. With `--human`, replay requires `vertices_w` and `mesh_faces` in the human npz and raises a clear error if either field is missing. Frames are synchronized by timestamp, so different robot and human FPS values are supported. The default mesh offset is `0,1.25,0`, placing the human on the robot's left side in the world `+Y` direction.
 
 For Viser:
 

@@ -5,6 +5,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from conftest import make_canonical_motion
 from retargeter.newton import IKState, RobotSpec, Stage1Motion
 from retargeter.visualize import (
     replay_stage1_motion_with_newton,
@@ -32,6 +33,7 @@ class FakeViewer:
         self.output_path = output_path
         self.model = None
         self.logged = []
+        self.meshes = []
         self.times = []
         self.closed = False
 
@@ -49,6 +51,16 @@ class FakeViewer:
 
     def log_state(self, state):
         self.logged.append(state)
+
+    def log_mesh(self, name, points, indices, **kwargs):
+        self.meshes.append(
+            {
+                "name": name,
+                "points": _as_numpy(points),
+                "indices": _as_numpy(indices),
+                "kwargs": dict(kwargs),
+            }
+        )
 
     def end_frame(self):
         pass
@@ -122,6 +134,66 @@ def test_replay_stage1_motion_uses_newton_viewer_api(tmp_path: Path):
     assert created[0][2].closed is True
 
 
+def test_replay_stage1_motion_logs_human_mesh_with_offset_and_time_sync():
+    spec = RobotSpec.from_yaml(G1_29_ROBOT)
+    motion = _make_stage1_motion(spec, num_frames=3)
+    motion.fps = 10.0
+    backend = FakeReplayBackend(spec)
+    created = []
+
+    human = make_canonical_motion(num_frames=6, fps=20.0)
+    vertices = np.zeros((6, 4, 3), dtype=np.float64)
+    for frame_idx in range(vertices.shape[0]):
+        vertices[frame_idx, :, 0] = float(frame_idx)
+    human.vertices_w = vertices
+    human.mesh_faces = np.asarray([[0, 1, 2], [0, 2, 3]], dtype=np.int32)
+
+    def viewer_factory(viewer, options):
+        fake = FakeViewer(options["output_path"])
+        created.append(fake)
+        return fake
+
+    result = replay_stage1_motion_with_newton(
+        motion,
+        spec,
+        viewer="null",
+        backend=backend,
+        viewer_factory=viewer_factory,
+        human_motion=human,
+        human_offset=(1.0, 2.0, 3.0),
+    )
+
+    viewer = created[0]
+    assert result.frame_count == 3
+    assert len(viewer.logged) == 3
+    assert len(viewer.meshes) == 3
+    assert [mesh["name"] for mesh in viewer.meshes] == ["human/smplx_mesh"] * 3
+    expected_human_indices = [0, 2, 4]
+    for mesh, expected_idx in zip(viewer.meshes, expected_human_indices, strict=True):
+        assert np.allclose(mesh["points"][:, 0], expected_idx + 1.0)
+        assert np.allclose(mesh["points"][:, 1], 2.0)
+        assert np.allclose(mesh["points"][:, 2], 3.0)
+        assert np.array_equal(mesh["indices"], np.asarray([0, 1, 2, 0, 2, 3], dtype=np.int32))
+        assert mesh["kwargs"]["backface_culling"] is False
+        assert len(mesh["kwargs"]["color"]) == 3
+
+
+def test_replay_stage1_motion_rejects_human_without_mesh():
+    spec = RobotSpec.from_yaml(G1_29_ROBOT)
+    motion = _make_stage1_motion(spec, num_frames=1)
+    human = make_canonical_motion(num_frames=1)
+
+    with pytest.raises(ValueError, match="vertices_w and mesh_faces"):
+        replay_stage1_motion_with_newton(
+            motion,
+            spec,
+            viewer="null",
+            backend=FakeReplayBackend(spec),
+            viewer_factory=lambda viewer, options: FakeViewer(options["output_path"]),
+            human_motion=human,
+        )
+
+
 def _make_stage1_motion(spec: RobotSpec, num_frames: int = 5) -> Stage1Motion:
     joint_pos = np.zeros((num_frames, spec.num_dofs), dtype=np.float64)
     for idx in range(spec.num_dofs):
@@ -147,3 +219,9 @@ def _make_stage1_motion(spec: RobotSpec, num_frames: int = 5) -> Stage1Motion:
         body_quat_xyzw=body_quat,
         success=np.ones((num_frames,), dtype=bool),
     )
+
+
+def _as_numpy(value):
+    if hasattr(value, "numpy"):
+        return value.numpy()
+    return np.asarray(value)

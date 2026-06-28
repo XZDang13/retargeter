@@ -11,6 +11,7 @@ import retargeter.preprocess.smpl_fk as smpl_fk_module
 
 class FakeModel:
     num_betas = 10
+    faces = np.asarray([[0, 1, 2], [0, 2, 3]], dtype=np.int32)
 
     def to(self, device):
         return self
@@ -48,4 +49,5 @@ def test_smpl_forward_kinematics_uses_mocked_smplx(monkeypatch, tmp_path):
     assert canonical.body_pos_w.shape == (3, len(REQUIRED_STAGE1_BODY_NAMES), 3)
     assert canonical.body_quat_xyzw.shape == (3, len(REQUIRED_STAGE1_BODY_NAMES), 4)
     assert canonical.vertices_w.shape == (3, 8, 3)
+    assert np.array_equal(canonical.mesh_faces, FakeModel.faces)
     assert np.allclose(np.linalg.norm(canonical.body_quat_xyzw, axis=-1), 1.0)

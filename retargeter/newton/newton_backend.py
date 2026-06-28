@@ -268,11 +268,16 @@ class NewtonBackend:
         for objective in objectives:
             if objective.kind == "position":
                 body_index = self._body_name_to_newton_index[objective.body_name or ""]
+                local_pos = (
+                    np.zeros(3, dtype=np.float64)
+                    if objective.body_local_pos is None
+                    else np.asarray(objective.body_local_pos, dtype=np.float64)
+                )
                 target = self._wp.array(np.asarray([objective.target], dtype=np.float32), dtype=self._wp.vec3)
                 native.append(
                     self._newton.ik.IKObjectivePosition(
                         body_index,
-                        self._wp.vec3(0.0, 0.0, 0.0),
+                        self._wp.vec3(float(local_pos[0]), float(local_pos[1]), float(local_pos[2])),
                         target,
                         weight=float(objective.weight),
                     )

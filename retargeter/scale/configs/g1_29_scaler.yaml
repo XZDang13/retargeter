@@ -65,10 +65,10 @@ body_map:
     robot: right_wrist_yaw_link
   left_shoulder:
     human: left_shoulder
-    robot: left_shoulder_yaw_link
+    robot: left_shoulder_roll_link
   right_shoulder:
     human: right_shoulder
-    robot: right_shoulder_yaw_link
+    robot: right_shoulder_roll_link
   left_elbow:
     human: left_elbow
     robot: left_elbow_link
@@ -83,10 +83,32 @@ body_map:
     robot: right_hip_roll_link
   left_ankle:
     human: left_ankle
+    robot: left_ankle_pitch_link
+  left_foot:
+    human: left_foot
+    robot: left_toe_link
+  left_toe:
+    human: left_toe
     robot: left_ankle_roll_link
+    robot_local_pos: [0.142362, 0.000048, -0.034586]
+  left_heel:
+    human: left_heel
+    robot: left_ankle_roll_link
+    robot_local_pos: [-0.065841, 0.000051, -0.034624]
   right_ankle:
     human: right_ankle
+    robot: right_ankle_pitch_link
+  right_foot:
+    human: right_foot
+    robot: right_toe_link
+  right_toe:
+    human: right_toe
     robot: right_ankle_roll_link
+    robot_local_pos: [0.142362, -0.000048, -0.034586]
+  right_heel:
+    human: right_heel
+    robot: right_ankle_roll_link
+    robot_local_pos: [-0.065841, -0.000051, -0.034624]
   left_knee:
     human: left_knee
     robot: left_knee_link

@@ -38,6 +38,7 @@ class CanonicalHumanMotion:
     body_pos_w: np.ndarray
     body_quat_xyzw: np.ndarray
     vertices_w: np.ndarray | None = None
+    mesh_faces: np.ndarray | None = None
     metadata: dict = field(default_factory=dict)
 
     def num_frames(self) -> int:
@@ -106,6 +107,17 @@ class CanonicalHumanMotion:
             if not np.all(np.isfinite(vertices)):
                 raise ValueError("vertices_w contains NaN or inf values.")
 
+        if self.mesh_faces is not None:
+            faces = np.asarray(self.mesh_faces)
+            if faces.ndim != 2 or faces.shape[1] != 3:
+                raise ValueError(f"mesh_faces must have shape [F, 3], got {faces.shape}.")
+            if not np.issubdtype(faces.dtype, np.integer):
+                raise ValueError("mesh_faces must contain integer vertex indices.")
+            if faces.size and np.min(faces) < 0:
+                raise ValueError("mesh_faces contains negative vertex indices.")
+            if self.vertices_w is not None and faces.size and np.max(faces) >= self.vertices_w.shape[1]:
+                raise ValueError("mesh_faces references vertices outside vertices_w.")
+
         if required_bodies is not None:
             missing = [name for name in required_bodies if name not in self.body_names]
             if missing:
@@ -118,5 +130,6 @@ class CanonicalHumanMotion:
             body_pos_w=self.body_pos_w.copy(),
             body_quat_xyzw=self.body_quat_xyzw.copy(),
             vertices_w=None if self.vertices_w is None else self.vertices_w.copy(),
+            mesh_faces=None if self.mesh_faces is None else self.mesh_faces.copy(),
             metadata=copy.deepcopy(self.metadata),
         )

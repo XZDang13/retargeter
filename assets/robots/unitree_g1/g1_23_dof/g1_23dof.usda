@@ -1,0 +1,30 @@
+#usda 1.0
+(
+    "robot-only GMR source g1_mocap_23dof_rubber_hand.xml; joint ranges patched from g1_23_robot.yaml"
+    customLayerData = {
+        string creator = "MuJoCo USD Converter v0.2.0"
+    }
+    defaultPrim = "g1_23dof"
+    kilogramsPerUnit = 1
+    metersPerUnit = 1
+    upAxis = "Z"
+)
+
+def Xform "g1_23dof" (
+    prepend apiSchemas = ["GeomModelAPI"]
+    assetInfo = {
+        string name = "g1_23dof"
+    }
+    kind = "component"
+    prepend payload = @./Payload/Contents.usda@
+)
+{
+    float3[] extentsHint = [(-0.07909053, -0.18570189, 0.0007271025), (0.36861184, 0.18571189, 1.3235726), (3.4028235e38, 3.4028235e38, 3.4028235e38), (-3.4028235e38, -3.4028235e38, -3.4028235e38), (3.4028235e38, 3.4028235e38, 3.4028235e38), (-3.4028235e38, -3.4028235e38, -3.4028235e38), (-0.0535535, -0.12350646, 0.031136248), (0.05525, 0.12350646, 0.99492)]
+}
+
+def PhysicsScene "PhysicsScene" (
+    prepend payload = @./Payload/Contents.usda@</PhysicsScene>
+)
+{
+}
+

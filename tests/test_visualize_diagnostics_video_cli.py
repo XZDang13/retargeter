@@ -11,6 +11,7 @@ from retargeter.cli.visualize_stage1 import main as visualize_main
 from retargeter.newton import IKState, RobotSpec, Stage1Motion, export_stage1_motion
 from retargeter.preprocess import FootContactResult, PreprocessResult
 from retargeter.visualize import (
+    export_canonical_human_motion_npz,
     load_canonical_human_motion_npz,
     plot_contact_scores,
     plot_foot_height_and_speed,
@@ -60,14 +61,32 @@ def test_load_canonical_human_motion_npz_round_trip(tmp_path: Path):
     assert np.allclose(loaded.body_pos_w, motion.body_pos_w)
 
 
+def test_export_canonical_human_motion_npz_round_trips_mesh(tmp_path: Path):
+    motion = make_canonical_motion(num_frames=2, include_vertices=True)
+    motion.mesh_faces = np.asarray([[0, 1, 2], [0, 2, 3]], dtype=np.int32)
+    path = tmp_path / "human_mesh.npz"
+
+    export_canonical_human_motion_npz(motion, path, require_mesh=True)
+    loaded = load_canonical_human_motion_npz(path)
+
+    assert loaded.vertices_w is not None
+    assert loaded.mesh_faces is not None
+    assert np.allclose(loaded.vertices_w, motion.vertices_w)
+    assert np.array_equal(loaded.mesh_faces, motion.mesh_faces)
+
+
 def test_visualize_cli_replay_and_diagnostics_modes(tmp_path: Path):
     human = make_canonical_motion(num_frames=2)
+    human_mesh = make_canonical_motion(num_frames=2, include_vertices=True)
+    human_mesh.mesh_faces = np.asarray([[0, 1, 2], [0, 2, 3]], dtype=np.int32)
     stage1 = _make_stage1_motion(num_frames=2)
     human_path = tmp_path / "human.npz"
+    human_mesh_path = tmp_path / "human_mesh.npz"
     stage1_path = tmp_path / "stage1.npz"
     config_path = tmp_path / "vis.yaml"
     config_path.write_text("viewer: file\nfps: 5\n", encoding="utf-8")
     _write_human_npz(human_path, human, include_contact=True)
+    export_canonical_human_motion_npz(human_mesh, human_mesh_path, require_mesh=True)
     export_stage1_motion(stage1, stage1_path)
 
     replay_dir = tmp_path / "replay"
@@ -88,6 +107,37 @@ def test_visualize_cli_replay_and_diagnostics_modes(tmp_path: Path):
         viewer_factory=fake_viewer_factory,
     ) == 0
     assert (replay_dir / "newton_replay.json").exists()
+
+    overlay_created = []
+
+    def overlay_viewer_factory(viewer, options):
+        fake = FakeViewer(options.get("output_path"))
+        overlay_created.append(fake)
+        return fake
+
+    overlay_dir = tmp_path / "overlay_replay"
+    assert visualize_main(
+        [
+            "--human",
+            str(human_mesh_path),
+            "--stage1",
+            str(stage1_path),
+            "--output",
+            str(overlay_dir),
+            "--mode",
+            "replay",
+            "--config",
+            str(config_path),
+            "--robot-spec",
+            str(G1_29_ROBOT),
+            "--human-offset",
+            "1,2,3",
+        ],
+        backend=FakeReplayBackend(RobotSpec.from_yaml(G1_29_ROBOT)),
+        viewer_factory=overlay_viewer_factory,
+    ) == 0
+    assert (overlay_dir / "newton_replay.json").exists()
+    assert len(overlay_created[0].meshes) == 2
 
     diagnostics_dir = tmp_path / "diagnostics"
     assert visualize_main(
@@ -122,6 +172,7 @@ class FakeViewer:
     def __init__(self, output_path: Path | None):
         self.output_path = output_path
         self.model = None
+        self.meshes = []
 
     def set_model(self, model):
         self.model = model
@@ -137,6 +188,9 @@ class FakeViewer:
 
     def log_state(self, state):
         pass
+
+    def log_mesh(self, name, points, indices, **kwargs):
+        self.meshes.append((name, _as_numpy(points), _as_numpy(indices), dict(kwargs)))
 
     def end_frame(self):
         pass
@@ -218,3 +272,9 @@ def _make_preprocess_result(motion):
         ground_height=0.0,
     )
     return PreprocessResult(motion=motion, ground=None, contact=contact, warnings=[])
+
+
+def _as_numpy(value):
+    if hasattr(value, "numpy"):
+        return value.numpy()
+    return np.asarray(value)

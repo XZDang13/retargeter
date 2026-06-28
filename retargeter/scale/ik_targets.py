@@ -15,6 +15,7 @@ class BodyIKTarget:
     target_quat_xyzw: np.ndarray | None
     pos_weight: float
     rot_weight: float
+    robot_local_pos: np.ndarray | None = None
     confidence: float = 1.0
     metadata: dict = field(default_factory=dict)
 
@@ -38,6 +39,14 @@ class BodyIKTarget:
                 raise ValueError(f"target_pos_w for {self.semantic_name!r} must have shape [3], got {pos.shape}.")
             if not np.all(np.isfinite(pos)):
                 raise ValueError(f"target_pos_w for {self.semantic_name!r} contains NaN or inf values.")
+            if self.robot_local_pos is not None:
+                local_pos = np.asarray(self.robot_local_pos)
+                if local_pos.shape != (3,):
+                    raise ValueError(
+                        f"robot_local_pos for {self.semantic_name!r} must have shape [3], got {local_pos.shape}."
+                    )
+                if not np.all(np.isfinite(local_pos)):
+                    raise ValueError(f"robot_local_pos for {self.semantic_name!r} contains NaN or inf values.")
 
         if self.target_quat_xyzw is not None:
             quat = np.asarray(self.target_quat_xyzw)
@@ -77,4 +86,3 @@ class IKTargetSet:
             if target.semantic_name in seen:
                 raise ValueError(f"Duplicate target semantic_name {target.semantic_name!r}.")
             seen.add(target.semantic_name)
-

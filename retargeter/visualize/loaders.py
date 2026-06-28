@@ -7,6 +7,46 @@ import numpy as np
 from retargeter.preprocess import CanonicalHumanMotion, FootContactResult, PreprocessResult
 
 
+def export_canonical_human_motion_npz(
+    motion: CanonicalHumanMotion,
+    path: Path | str,
+    *,
+    preprocess_result: PreprocessResult | None = None,
+    require_mesh: bool = False,
+) -> Path:
+    motion.validate()
+    if require_mesh and (motion.vertices_w is None or motion.mesh_faces is None):
+        raise ValueError("Human replay export requires vertices_w and mesh_faces.")
+
+    output = Path(path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "fps": np.asarray(float(motion.fps)),
+        "body_names": np.asarray(motion.body_names),
+        "body_pos_w": np.asarray(motion.body_pos_w, dtype=np.float64),
+        "body_quat_xyzw": np.asarray(motion.body_quat_xyzw, dtype=np.float64),
+    }
+    if motion.vertices_w is not None:
+        payload["vertices_w"] = np.asarray(motion.vertices_w, dtype=np.float64)
+    if motion.mesh_faces is not None:
+        payload["mesh_faces"] = np.asarray(motion.mesh_faces, dtype=np.int32)
+
+    contact = None if preprocess_result is None else preprocess_result.contact
+    if contact is not None:
+        payload["ground_height"] = np.asarray(float(contact.ground_height))
+        for region, score in contact.contact_score.items():
+            payload[f"contact_score_{region}"] = np.asarray(score, dtype=np.float64)
+        for region, binary in contact.contact_binary.items():
+            payload[f"contact_binary_{region}"] = np.asarray(binary, dtype=bool)
+        for region, height in contact.foot_height.items():
+            payload[f"foot_height_{region}"] = np.asarray(height, dtype=np.float64)
+        for region, speed in contact.foot_speed.items():
+            payload[f"foot_speed_{region}"] = np.asarray(speed, dtype=np.float64)
+
+    np.savez_compressed(output, **payload)
+    return output
+
+
 def load_canonical_human_motion_npz(path: Path | str) -> CanonicalHumanMotion:
     data = np.load(Path(path), allow_pickle=False)
     required = ["fps", "body_names", "body_pos_w", "body_quat_xyzw"]
@@ -14,12 +54,14 @@ def load_canonical_human_motion_npz(path: Path | str) -> CanonicalHumanMotion:
     if missing:
         raise ValueError(f"Canonical human motion npz {path} is missing fields: {missing}.")
     vertices = np.asarray(data["vertices_w"], dtype=np.float64) if "vertices_w" in data else None
+    mesh_faces = np.asarray(data["mesh_faces"], dtype=np.int32) if "mesh_faces" in data else None
     motion = CanonicalHumanMotion(
         fps=float(data["fps"]),
         body_names=[str(name) for name in data["body_names"].tolist()],
         body_pos_w=np.asarray(data["body_pos_w"], dtype=np.float64),
         body_quat_xyzw=np.asarray(data["body_quat_xyzw"], dtype=np.float64),
         vertices_w=vertices,
+        mesh_faces=mesh_faces,
         metadata={"loaded_from": str(path)},
     )
     motion.validate()

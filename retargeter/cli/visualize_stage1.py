@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+import numpy as np
+
 from retargeter.newton import RobotSpec, load_stage1_motion_npz
 from retargeter.visualize import (
     load_canonical_human_motion_npz,
@@ -76,6 +78,8 @@ def run_visualize_stage1(args: argparse.Namespace, *, backend=None, viewer_facto
             share=bool(config.get("share", False)),
             backend=backend,
             viewer_factory=viewer_factory,
+            human_motion=human_motion,
+            human_offset=parse_human_offset(args.human_offset),
         )
         if replay_result.output_path is not None:
             written.append(replay_result.output_path)
@@ -107,6 +111,21 @@ def _write_diagnostics(output_dir: Path, stage1_motion, preprocess_result, robot
     return paths
 
 
+def parse_human_offset(raw: str | None):
+    if raw is None:
+        return None
+    parts = [part.strip() for part in str(raw).split(",")]
+    if len(parts) != 3:
+        raise ValueError("--human-offset must be comma-separated X,Y,Z.")
+    try:
+        values = tuple(float(part) for part in parts)
+    except ValueError as exc:
+        raise ValueError("--human-offset must contain three numeric values.") from exc
+    if not np.all(np.isfinite(values)):
+        raise ValueError("--human-offset values must be finite.")
+    return values
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Visualize Stage 1 retargeting outputs.")
     parser.add_argument("--human", type=Path, default=None, help="CanonicalHumanMotion npz path.")
@@ -123,6 +142,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--realtime", type=int, choices=[0, 1], default=0, help="Sleep between frames while replaying.")
     parser.add_argument("--replay-name", default=None, help="Output replay filename for file/usd viewers.")
     parser.add_argument("--robot-spec", type=Path, default=None, help="RobotSpec YAML for Newton replay and diagnostics.")
+    parser.add_argument(
+        "--human-offset",
+        default=None,
+        help="Comma-separated X,Y,Z offset for replay human mesh overlay. Default: 0,1.25,0.",
+    )
     return parser
 
 

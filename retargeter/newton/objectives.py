@@ -21,6 +21,7 @@ class IKObjectiveDescriptor:
     body_name: str | None = None
     semantic_name: str | None = None
     target: np.ndarray | None = None
+    body_local_pos: np.ndarray | None = None
     confidence: float = 1.0
 
     def validate(self, robot_spec: RobotSpec) -> None:
@@ -42,6 +43,14 @@ class IKObjectiveDescriptor:
                 raise ValueError(f"position target for {self.body_name!r} must have shape [3], got {target.shape}.")
             if not np.all(np.isfinite(target)):
                 raise ValueError(f"position target for {self.body_name!r} contains NaN or inf values.")
+            if self.body_local_pos is not None:
+                local_pos = np.asarray(self.body_local_pos, dtype=np.float64)
+                if local_pos.shape != (3,):
+                    raise ValueError(
+                        f"position local point for {self.body_name!r} must have shape [3], got {local_pos.shape}."
+                    )
+                if not np.all(np.isfinite(local_pos)):
+                    raise ValueError(f"position local point for {self.body_name!r} contains NaN or inf values.")
 
         if self.kind == "rotation":
             target = np.asarray(self.target, dtype=np.float64)
@@ -77,6 +86,9 @@ def build_target_objectives(target_set: IKTargetSet, robot_spec: RobotSpec) -> l
                     body_name=target.robot_body_name,
                     semantic_name=target.semantic_name,
                     target=np.asarray(target.target_pos_w, dtype=np.float64).copy(),
+                    body_local_pos=None
+                    if target.robot_local_pos is None
+                    else np.asarray(target.robot_local_pos, dtype=np.float64).copy(),
                     confidence=confidence,
                 )
             )

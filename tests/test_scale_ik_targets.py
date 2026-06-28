@@ -16,6 +16,7 @@ def test_ik_target_set_validation_and_active_filters():
             target_quat_xyzw=np.array([0.0, 0.0, 0.0, 1.0]),
             pos_weight=1.0,
             rot_weight=0.0,
+            robot_local_pos=np.array([0.1, 0.0, -0.02]),
         ),
         BodyIKTarget(
             semantic_name="chest",
@@ -32,6 +33,7 @@ def test_ik_target_set_validation_and_active_filters():
     target_set.validate()
 
     assert target_set.get_target("pelvis").robot_body_name == "pelvis"
+    assert np.allclose(target_set.get_target("pelvis").robot_local_pos, [0.1, 0.0, -0.02])
     assert [target.semantic_name for target in target_set.active_position_targets()] == ["pelvis"]
     assert [target.semantic_name for target in target_set.active_rotation_targets()] == ["chest"]
 
@@ -50,4 +52,3 @@ def test_ik_target_set_rejects_duplicate_semantic_name():
 
     with pytest.raises(ValueError, match="Duplicate"):
         target_set.validate()
-

@@ -107,6 +107,9 @@ class SMPLForwardKinematics:
         vertices = None
         if return_vertices and getattr(output, "vertices", None) is not None:
             vertices = output.vertices.detach().cpu().numpy()
+        mesh_faces = None
+        if vertices is not None and getattr(self.model, "faces", None) is not None:
+            mesh_faces = np.asarray(self.model.faces, dtype=np.int32).copy()
 
         global_joint_quats = self._global_joint_quats_xyzw(motion)
         body_pos = np.stack([joints[:, self._body_index(name), :] for name in REQUIRED_STAGE1_BODY_NAMES], axis=1)
@@ -127,6 +130,7 @@ class SMPLForwardKinematics:
             body_pos_w=body_pos,
             body_quat_xyzw=body_quat,
             vertices_w=vertices,
+            mesh_faces=mesh_faces,
             metadata={
                 "source_model_type": motion.model_type,
                 "source_gender": motion.gender,

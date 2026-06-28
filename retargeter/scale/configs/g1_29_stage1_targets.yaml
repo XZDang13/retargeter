@@ -11,6 +11,15 @@ stage1a:
   left_ankle:
     pos_weight: 50.0
     rot_weight: 0.0
+  left_foot:
+    pos_weight: 80.0
+    rot_weight: 2.0
+  left_toe:
+    pos_weight: 0.0
+    rot_weight: 0.0
+  left_heel:
+    pos_weight: 0.0
+    rot_weight: 0.0
   right_hip:
     pos_weight: 0.0
     rot_weight: 10.0
@@ -19,6 +28,15 @@ stage1a:
     rot_weight: 10.0
   right_ankle:
     pos_weight: 50.0
+    rot_weight: 0.0
+  right_foot:
+    pos_weight: 80.0
+    rot_weight: 2.0
+  right_toe:
+    pos_weight: 0.0
+    rot_weight: 0.0
+  right_heel:
+    pos_weight: 0.0
     rot_weight: 0.0
   chest:
     pos_weight: 0.0
@@ -55,6 +73,15 @@ stage1b:
   left_ankle:
     pos_weight: 50.0
     rot_weight: 0.0
+  left_foot:
+    pos_weight: 100.0
+    rot_weight: 5.0
+  left_toe:
+    pos_weight: 0.0
+    rot_weight: 0.0
+  left_heel:
+    pos_weight: 0.0
+    rot_weight: 0.0
   right_hip:
     pos_weight: 10.0
     rot_weight: 5.0
@@ -63,6 +90,15 @@ stage1b:
     rot_weight: 5.0
   right_ankle:
     pos_weight: 50.0
+    rot_weight: 0.0
+  right_foot:
+    pos_weight: 100.0
+    rot_weight: 5.0
+  right_toe:
+    pos_weight: 0.0
+    rot_weight: 0.0
+  right_heel:
+    pos_weight: 0.0
     rot_weight: 0.0
   chest:
     pos_weight: 0.0
@@ -90,10 +126,26 @@ contact_weight_modulation:
   enabled: true
   regions:
     left_foot:
-      target: left_ankle
-      extra_pos_weight: 10.0
+      target: left_foot
+      extra_pos_weight: 20.0
+      extra_rot_weight: 0.0
+    left_toe:
+      target: left_toe
+      extra_pos_weight: 50.0
+      extra_rot_weight: 0.0
+    left_heel:
+      target: left_heel
+      extra_pos_weight: 50.0
       extra_rot_weight: 0.0
     right_foot:
-      target: right_ankle
-      extra_pos_weight: 10.0
+      target: right_foot
+      extra_pos_weight: 20.0
+      extra_rot_weight: 0.0
+    right_toe:
+      target: right_toe
+      extra_pos_weight: 50.0
+      extra_rot_weight: 0.0
+    right_heel:
+      target: right_heel
+      extra_pos_weight: 50.0
       extra_rot_weight: 0.0

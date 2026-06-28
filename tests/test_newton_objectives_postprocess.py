@@ -31,6 +31,31 @@ def test_build_target_objectives_preserves_target_weights_and_confidence():
     assert pelvis_pos.confidence == 1.0
 
 
+def test_local_foot_target_objective_preserves_body_local_point():
+    spec = RobotSpec.from_yaml(G1_29_ROBOT)
+    target_set = IKTargetSet(
+        stage_name="stage1b",
+        targets=[
+            BodyIKTarget(
+                semantic_name="left_toe",
+                human_body_name="left_toe",
+                robot_body_name="left_ankle_roll_link",
+                target_pos_w=np.zeros(3),
+                target_quat_xyzw=None,
+                pos_weight=1.0,
+                rot_weight=0.0,
+                robot_local_pos=np.array([0.10, 0.0, 0.0]),
+            )
+        ],
+    )
+
+    descriptors = build_target_objectives(target_set, spec)
+
+    left_toe = next(d for d in descriptors if d.kind == "position" and d.semantic_name == "left_toe")
+    assert left_toe.body_name == "left_ankle_roll_link"
+    assert np.allclose(left_toe.body_local_pos, [0.10, 0.0, 0.0])
+
+
 def test_target_objectives_raise_for_missing_robot_body():
     spec = RobotSpec.from_yaml(G1_29_ROBOT)
     target_set = IKTargetSet(

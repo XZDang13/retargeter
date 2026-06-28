@@ -26,6 +26,7 @@ from retargeter.preprocess import (
 from retargeter.preprocess.smpl_fk import SMPLForwardKinematics
 from retargeter.scale import Stage1TargetBuilder
 from retargeter.visualize import (
+    export_canonical_human_motion_npz,
     load_vis_config,
     plot_contact_scores,
     plot_foot_height_and_speed,
@@ -75,8 +76,10 @@ def main(
         viewer_backend_factory=viewer_backend_factory,
         viewer_factory=viewer_factory,
     )
-    for key in ("motion_path", "metadata_path", "quality_path"):
-        print(result[key])
+    for key in ("motion_path", "metadata_path", "quality_path", "human_path"):
+        path = result.get(key)
+        if path is not None:
+            print(path)
     for path in result.get("visualization_paths", []):
         print(path)
     return 0
@@ -96,6 +99,12 @@ def run_stage1_pipeline(
 
     preprocess_config = load_preprocess_config(config_paths["preprocess_config"])
     input_is_mock = str(args.input).lower() == "mock"
+    human_output_path = getattr(args, "human_output", None)
+    if human_output_path is not None:
+        if input_is_mock:
+            raise ValueError("--human-output requires a real SMPL/SMPL-X input with vertices.")
+        if bool(getattr(args, "no_vertices", False)):
+            raise ValueError("--human-output requires vertices; do not use --no-vertices.")
 
     if input_is_mock:
         canonical_motion = make_mock_canonical_motion(
@@ -115,6 +124,15 @@ def run_stage1_pipeline(
         }
     else:
         canonical_motion, preprocess_result, source_metadata = run_real_input_pipeline(args, preprocess_config)
+
+    human_path: Path | None = None
+    if human_output_path is not None:
+        human_path = export_canonical_human_motion_npz(
+            preprocess_result.motion,
+            human_output_path,
+            preprocess_result=preprocess_result,
+            require_mesh=True,
+        )
 
     target_builder = Stage1TargetBuilder(config_paths["scaler_config"], config_paths["target_config"])
     newton_config = load_stage1_newton_config(config_paths["newton_config"])
@@ -171,6 +189,7 @@ def run_stage1_pipeline(
         "motion_path": motion_path,
         "metadata_path": metadata_path,
         "quality_path": quality_path,
+        "human_path": human_path,
         "visualization_paths": visualization_paths,
         "canonical_motion": canonical_motion,
         "preprocess_result": preprocess_result,
@@ -471,6 +490,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--mock-frames", type=int, default=120)
     parser.add_argument("--no-vertices", action="store_true")
+    parser.add_argument(
+        "--human-output",
+        type=Path,
+        default=None,
+        help="Optional canonical human replay npz output with SMPL-X vertices and mesh faces.",
+    )
     parser.add_argument("--visualize-config", type=Path, default=None)
     parser.add_argument("--visualize-fps", type=int, default=None)
     parser.add_argument("--newton-viewer", choices=["file", "usd", "viser", "gl", "null"], default=None)

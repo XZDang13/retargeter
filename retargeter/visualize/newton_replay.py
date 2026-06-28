@@ -8,9 +8,12 @@ from typing import Any, Callable, Protocol
 import numpy as np
 
 from retargeter.newton import IKState, NewtonBackend, RobotSpec, Stage1Motion
+from retargeter.preprocess import CanonicalHumanMotion
 
 
 NEWTON_VIEWER_KINDS = {"file", "usd", "viser", "gl", "null"}
+DEFAULT_HUMAN_MESH_OFFSET = np.asarray([0.0, 1.25, 0.0], dtype=np.float64)
+DEFAULT_HUMAN_MESH_COLOR = (0.58, 0.72, 0.82)
 
 
 class ReplayBackend(Protocol):
@@ -31,6 +34,15 @@ class NewtonReplayResult:
     fps: float
     output_path: Path | None = None
     url: str | None = None
+
+
+@dataclass(frozen=True)
+class HumanMeshOverlay:
+    motion: CanonicalHumanMotion
+    offset: np.ndarray
+    indices: Any
+    wp: Any
+    color: tuple[float, float, float]
 
 
 def stage1_frame_to_ik_state(motion: Stage1Motion, robot_spec: RobotSpec, frame_idx: int) -> IKState:
@@ -70,6 +82,9 @@ def replay_stage1_motion_with_newton(
     close_viewer: bool = True,
     backend: ReplayBackend | None = None,
     viewer_factory: ViewerFactory | None = None,
+    human_motion: CanonicalHumanMotion | None = None,
+    human_offset: np.ndarray | tuple[float, float, float] | list[float] | None = None,
+    human_mesh_color: tuple[float, float, float] = DEFAULT_HUMAN_MESH_COLOR,
 ) -> NewtonReplayResult:
     """Send Stage1Motion frames through Newton's real viewer API.
 
@@ -91,6 +106,11 @@ def replay_stage1_motion_with_newton(
     if output is not None:
         output.parent.mkdir(parents=True, exist_ok=True)
 
+    human_overlay = _prepare_human_mesh_overlay(
+        human_motion,
+        offset=human_offset,
+        color=human_mesh_color,
+    )
     replay_backend = backend or NewtonBackend(robot_spec, load_visual_shapes=True, add_ground_plane=True)
     newton_viewer = _make_viewer(
         viewer,
@@ -119,6 +139,9 @@ def replay_stage1_motion_with_newton(
             newton_viewer.begin_frame(frames_written / effective_fps)
             newton_viewer.log_state(native_state)
             _log_replay_scalars(newton_viewer, frame_idx, ik_state)
+            if human_overlay is not None:
+                robot_time_s = frame_idx / float(motion.fps)
+                _log_human_mesh(newton_viewer, human_overlay, robot_time_s)
             newton_viewer.end_frame()
             frames_written += 1
 
@@ -146,6 +169,77 @@ def replay_stage1_motion_with_newton(
         output_path=output,
         url=getattr(newton_viewer, "url", None),
     )
+
+
+def _prepare_human_mesh_overlay(
+    motion: CanonicalHumanMotion | None,
+    *,
+    offset: np.ndarray | tuple[float, float, float] | list[float] | None,
+    color: tuple[float, float, float],
+) -> HumanMeshOverlay | None:
+    if motion is None:
+        return None
+    motion.validate()
+    if motion.vertices_w is None or motion.mesh_faces is None:
+        raise ValueError("Human mesh replay requires vertices_w and mesh_faces.")
+    if motion.num_frames() <= 0:
+        raise ValueError("Human mesh replay requires at least one human frame.")
+
+    try:
+        import warp as wp
+    except ImportError as exc:  # pragma: no cover - runtime dependency for Newton viewers.
+        raise RuntimeError("Warp is required for human mesh replay.") from exc
+
+    offset_arr = _human_offset_array(offset)
+    color_tuple = _human_mesh_color(color)
+    faces = np.asarray(motion.mesh_faces, dtype=np.int32)
+    indices = wp.array(faces.reshape(-1), dtype=wp.int32)
+    return HumanMeshOverlay(motion=motion, offset=offset_arr, indices=indices, wp=wp, color=color_tuple)
+
+
+def _log_human_mesh(newton_viewer, overlay: HumanMeshOverlay, robot_time_s: float) -> None:
+    log_mesh = getattr(newton_viewer, "log_mesh", None)
+    if log_mesh is None:
+        raise RuntimeError("Selected Newton viewer does not support human mesh replay.")
+
+    human_idx = _human_frame_index(robot_time_s, overlay.motion.fps, overlay.motion.num_frames())
+    vertices = np.asarray(overlay.motion.vertices_w[human_idx], dtype=np.float32).copy()
+    vertices += overlay.offset.astype(np.float32, copy=False)
+    points = overlay.wp.array(vertices, dtype=overlay.wp.vec3)
+    log_mesh(
+        "human/smplx_mesh",
+        points,
+        overlay.indices,
+        color=overlay.color,
+        backface_culling=False,
+    )
+
+
+def _human_frame_index(robot_time_s: float, human_fps: float, frame_count: int) -> int:
+    if frame_count <= 0:
+        raise ValueError("frame_count must be positive.")
+    if not np.isfinite(robot_time_s):
+        raise ValueError(f"robot_time_s must be finite, got {robot_time_s!r}.")
+    if not np.isfinite(human_fps) or human_fps <= 0.0:
+        raise ValueError(f"human_fps must be positive and finite, got {human_fps!r}.")
+    idx = int(round(float(robot_time_s) * float(human_fps)))
+    return int(np.clip(idx, 0, frame_count - 1))
+
+
+def _human_offset_array(offset: np.ndarray | tuple[float, float, float] | list[float] | None) -> np.ndarray:
+    arr = DEFAULT_HUMAN_MESH_OFFSET if offset is None else np.asarray(offset, dtype=np.float64)
+    if arr.shape != (3,):
+        raise ValueError(f"human_offset must have shape [3], got {arr.shape}.")
+    if not np.all(np.isfinite(arr)):
+        raise ValueError("human_offset contains NaN or inf values.")
+    return arr.astype(np.float64, copy=True)
+
+
+def _human_mesh_color(color: tuple[float, float, float]) -> tuple[float, float, float]:
+    arr = np.asarray(color, dtype=np.float64)
+    if arr.shape != (3,) or not np.all(np.isfinite(arr)):
+        raise ValueError(f"human_mesh_color must be three finite floats, got {color!r}.")
+    return tuple(float(value) for value in arr)
 
 
 def _log_replay_scalars(newton_viewer, frame_idx: int, state: IKState) -> None:

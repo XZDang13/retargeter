@@ -1,6 +1,6 @@
 robot: unitree_g1_29
 model:
-  path: assets/robots/unitree_g1/g1_29_dof_rubber_hand/g1_29dof.usda
+  path: assets/robots/unitree_g1/g1_29_dof/g1_mocap.usda
   format: usd
   floating_base: true
 root_body: pelvis
@@ -13,12 +13,14 @@ body_names:
   - left_knee_link
   - left_ankle_pitch_link
   - left_ankle_roll_link
+  - left_toe_link
   - right_hip_pitch_link
   - right_hip_roll_link
   - right_hip_yaw_link
   - right_knee_link
   - right_ankle_pitch_link
   - right_ankle_roll_link
+  - right_toe_link
   - waist_yaw_link
   - waist_roll_link
   - torso_link

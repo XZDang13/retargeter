@@ -61,6 +61,7 @@ class HumanToRobotScaler:
             body_pos_w=scaled_pos,
             body_quat_xyzw=scaled_quat,
             vertices_w=None if motion.vertices_w is None else motion.vertices_w.copy(),
+            mesh_faces=None if motion.mesh_faces is None else motion.mesh_faces.copy(),
             metadata=copy.deepcopy(motion.metadata),
         )
         scaled.metadata["scale"] = {
@@ -201,6 +202,8 @@ def _validate_scaler_config(config: dict[str, Any], path: Path) -> None:
     for semantic_name, entry in config["body_map"].items():
         if not isinstance(entry, dict) or "human" not in entry or "robot" not in entry:
             raise ValueError(f"body_map entry {semantic_name!r} must contain human and robot names.")
+        if "robot_local_pos" in entry and np.asarray(entry["robot_local_pos"], dtype=np.float64).shape != (3,):
+            raise ValueError(f"body_map entry {semantic_name!r} robot_local_pos must have shape [3].")
 
     for name, offset in config["offsets"].items():
         if np.asarray(offset, dtype=np.float64).shape != (3,):

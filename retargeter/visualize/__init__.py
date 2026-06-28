@@ -11,8 +11,10 @@ from .diagnostic_plots import (
     plot_joint_velocities,
     plot_root_height,
 )
-from .loaders import load_canonical_human_motion_npz, load_preprocess_result_npz
+from .loaders import export_canonical_human_motion_npz, load_canonical_human_motion_npz, load_preprocess_result_npz
 from .newton_replay import (
+    DEFAULT_HUMAN_MESH_COLOR,
+    DEFAULT_HUMAN_MESH_OFFSET,
     NEWTON_VIEWER_KINDS,
     NewtonReplayResult,
     record_stage1_newton_replay,
@@ -23,8 +25,11 @@ from .newton_replay import (
 
 __all__ = [
     "DEFAULT_VIS_CONFIG_PATH",
+    "DEFAULT_HUMAN_MESH_COLOR",
+    "DEFAULT_HUMAN_MESH_OFFSET",
     "NEWTON_VIEWER_KINDS",
     "NewtonReplayResult",
+    "export_canonical_human_motion_npz",
     "load_canonical_human_motion_npz",
     "load_preprocess_result_npz",
     "load_vis_config",
