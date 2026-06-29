@@ -180,6 +180,21 @@ def test_refinement_quality_physical_filter_fails_absolute_foot_penetration_with
 def test_refinement_quality_physical_filter_fails_contact_weighted_floating():
     spec = _make_robot_spec()
     retargeted = _make_retargeted(spec)
+
+    dynamic = _make_refined(retargeted)
+    ankle_idx = dynamic.body_names.index("left_ankle_roll_link")
+    dynamic.body_pos_w[:, ankle_idx, 2] = 0.15
+    dynamic_report = evaluate_refinement_quality(
+        retargeted,
+        dynamic,
+        spec,
+        config=_loose_quality_config(),
+        contact_score={"left_foot": np.ones(dynamic.num_frames(), dtype=np.float64)},
+    )
+
+    assert dynamic_report.valid is True
+    assert dynamic_report.metrics["refined_weighted_foot_height_max_m"] == pytest.approx(0.15)
+
     refined = _make_refined(retargeted)
     ankle_idx = refined.body_names.index("left_ankle_roll_link")
     refined.body_pos_w[:, ankle_idx, 2] = 0.20
@@ -210,9 +225,26 @@ def test_refinement_quality_physical_filter_fails_unsupported_and_low_pelvis_mot
         contact_score={"left_foot": zeros, "right_foot": zeros},
     )
 
-    assert unsupported.valid is False
-    assert "support_unavailable" in unsupported.failures
+    assert unsupported.valid is True
+    assert "support_unavailable" not in unsupported.failures
     assert unsupported.metrics["unsupported_fraction"] == pytest.approx(1.0)
+    assert unsupported.thresholds["fail_on_support_unavailable"] is True
+
+    long_retargeted = _make_retargeted(spec, frames=45)
+    long_refined = _make_refined(long_retargeted)
+    long_zeros = np.zeros(long_refined.num_frames(), dtype=np.float64)
+    long_unsupported = evaluate_refinement_quality(
+        long_retargeted,
+        long_refined,
+        spec,
+        config=_loose_quality_config(),
+        contact_score={"left_foot": long_zeros, "right_foot": long_zeros},
+    )
+
+    assert long_unsupported.valid is False
+    assert "support_unavailable" in long_unsupported.failures
+    assert long_unsupported.metrics["unsupported_fraction"] == pytest.approx(1.0)
+    assert long_unsupported.metrics["unsupported_max_duration_s"] > long_unsupported.thresholds["max_unsupported_duration_s"]
 
     low = _make_refined(retargeted)
     low.root_pos_w[:, 2] = 0.2

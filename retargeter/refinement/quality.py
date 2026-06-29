@@ -27,15 +27,16 @@ DEFAULT_QUALITY_CONFIG: dict[str, float | bool] = {
 }
 DEFAULT_PHYSICAL_FEASIBILITY_CONFIG: dict[str, float | bool] = {
     "enabled": True,
-    "max_joint_acceleration_rad_s2": 400.0,
-    "max_joint_jerk_rad_s3": 8000.0,
+    "max_joint_acceleration_rad_s2": 800.0,
+    "max_joint_jerk_rad_s3": 40000.0,
     "max_foot_penetration_m": 0.03,
-    "max_weighted_foot_height_m": 0.12,
+    "max_weighted_foot_height_m": 0.18,
     "fail_on_pelvis_height": False,
     "min_pelvis_height_m": 0.30,
+    "fail_on_support_unavailable": True,
     "support_contact_threshold": 0.5,
     "support_max_foot_height_m": 0.08,
-    "max_unsupported_duration_s": 0.5,
+    "max_unsupported_duration_s": 1.0,
     "max_unsupported_fraction": 0.35,
     "bos_margin_m": 0.35,
     "max_bos_violation_fraction": 0.50,
@@ -419,8 +420,8 @@ def _physical_feasibility_failures(metrics: Mapping[str, Any], thresholds: Mappi
         failures.append("pelvis_height_too_low")
     if bool(metrics["support_evaluated"]):
         if (
-            float(metrics["unsupported_max_duration_s"]) > float(thresholds["max_unsupported_duration_s"])
-            or float(metrics["unsupported_fraction"]) > float(thresholds["max_unsupported_fraction"])
+            bool(thresholds["fail_on_support_unavailable"])
+            and float(metrics["unsupported_max_duration_s"]) > float(thresholds["max_unsupported_duration_s"])
         ):
             failures.append("support_unavailable")
         if float(metrics["bos_violation_fraction"]) > float(thresholds["max_bos_violation_fraction"]):

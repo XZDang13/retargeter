@@ -89,7 +89,7 @@ outputs/05_05_refine/human.npz
 
 Refine fails by default if `RefinementQualityReport.valid` is false. Use `--allow-invalid` to keep invalid outputs for debugging.
 
-Refinement quality includes a post-refine physical feasibility gate for joint limits, velocity, acceleration, jerk, foot penetration/floating, and conservative base-of-support checks. Pelvis height is reported but not a default rejection gate. Override thresholds or disable gates with the `physical_feasibility` section in `--refinement-config`.
+Refinement quality includes a post-refine physical feasibility gate for joint limits, velocity, acceleration, jerk, foot penetration/floating, support availability, and conservative base-of-support diagnostics. Pelvis height is reported but not a default rejection gate. Support availability is on by default, but it rejects only long continuous unsupported intervals, not total unsupported fraction, so jumps and kicks are not rejected solely for contact-light phases. Override thresholds with the `physical_feasibility` section in `--refinement-config`.
 
 `--fps` means input/source FPS override. `--target-fps` resamples SMPL/SMPL-X parameters before FK and controls downstream IK retarget/refinement FPS.
 
