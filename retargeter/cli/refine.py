@@ -3,12 +3,14 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+from retargeter.batch import assign_device, discover_inputs, parse_gpu_ids
 from retargeter.pipeline import RefinePipeline, load_refinement_config_file, refinement_config_with_overrides
 
 
 def main(argv: list[str] | None = None, *, backend_factory=None, refinement_fk_factory=None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
+    _validate_input_mode(parser, args)
     config = refinement_config_with_overrides(
         load_refinement_config_file(args.refinement_config),
         iterations=args.refinement_iterations,
@@ -29,10 +31,16 @@ def main(argv: list[str] | None = None, *, backend_factory=None, refinement_fk_f
         backend_factory=backend_factory,
         refinement_fk_factory=refinement_fk_factory,
     )
-    if args.inputs is not None or args.input_dir is not None:
+    if _is_batch_mode(args):
+        if args.workers > 1 and (backend_factory is not None or refinement_fk_factory is not None):
+            parser.error("Injected backend/refinement factories are only supported with --workers 1.")
         input_paths = _batch_inputs_from_args(args)
         if not input_paths:
             parser.error("batch mode did not find any inputs")
+        gpu_ids = parse_gpu_ids(args.gpu_ids)
+        worker_devices = (
+            [assign_device(index, gpu_ids, args.processes_per_gpu) for index in range(args.workers)] if gpu_ids else None
+        )
         batch_result = pipeline.run_batch(
             input_paths=input_paths,
             output_dir=args.output,
@@ -48,6 +56,15 @@ def main(argv: list[str] | None = None, *, backend_factory=None, refinement_fk_f
             refinement_config=config,
             allow_invalid=bool(args.allow_invalid),
             fail_fast=bool(args.fail_fast),
+            workers=args.workers,
+            resume=bool(args.resume),
+            skip_existing=bool(args.skip_existing),
+            overwrite=bool(args.overwrite),
+            input_dir=args.input_dir,
+            preserve_tree=bool(args.preserve_tree),
+            dry_run=bool(args.dry_run),
+            summary_csv=args.summary_csv,
+            worker_devices=worker_devices,
         )
         print(batch_result.manifest_path)
         return 0 if batch_result.failure_count == 0 else 1
@@ -76,10 +93,9 @@ def main(argv: list[str] | None = None, *, backend_factory=None, refinement_fk_f
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run offline IK retargeting + refinement for training data.")
-    input_group = parser.add_mutually_exclusive_group(required=True)
-    input_group.add_argument("--input", help="Input SMPL/SMPL-X .npz/.npy path, or 'mock'.")
-    input_group.add_argument("--inputs", nargs="+", help="Batch input SMPL/SMPL-X .npz/.npy paths, or 'mock'.")
-    input_group.add_argument("--input-dir", type=Path, default=None, help="Batch input directory.")
+    parser.add_argument("--input", help="Input SMPL/SMPL-X .npz/.npy path, or 'mock'.")
+    parser.add_argument("--inputs", nargs="+", help="Batch input SMPL/SMPL-X .npz/.npy paths, or 'mock'.")
+    parser.add_argument("--input-dir", type=Path, default=None, help="Batch input directory.")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--robot", default="unitree_g1_29")
     parser.add_argument("--model-type", choices=["smpl", "smplx"], default=None)
@@ -108,26 +124,45 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--input-pattern", action="append", default=None, help="Batch --input-dir glob pattern. Repeatable.")
     parser.add_argument("--recursive", action="store_true", help="Recursively discover --input-dir files.")
     parser.add_argument("--fail-fast", action="store_true", help="Stop a batch run after the first failed item.")
+    parser.add_argument("--workers", type=int, default=1, help="Number of batch worker processes.")
+    parser.add_argument("--gpu-ids", default=None, help="Comma-separated GPU ids for batch workers, e.g. 0,1,2.")
+    parser.add_argument("--processes-per-gpu", type=int, default=1, help="Batch worker slots per GPU id.")
+    parser.add_argument("--resume", action="store_true", help="Resume from an existing batch_manifest.json.")
+    parser.add_argument("--skip-existing", action="store_true", help="Skip items that already have final outputs.")
+    parser.add_argument("--overwrite", action="store_true", help="Reprocess items even when resume/skip-existing would skip.")
+    parser.add_argument("--input-list", type=Path, default=None, help="Text file containing batch inputs, one per line.")
+    parser.add_argument("--exclude-pattern", action="append", default=None, help="Exclude discovered batch inputs by fnmatch pattern.")
+    parser.add_argument("--preserve-tree", action="store_true", help="Preserve --input-dir relative paths under --output.")
+    parser.add_argument("--dry-run", action="store_true", help="Write planned batch manifest without retargeting.")
+    parser.add_argument("--summary-csv", type=Path, default=None, help="Optional CSV summary path for batch runs.")
     return parser
 
 
 def _batch_inputs_from_args(args: argparse.Namespace) -> list[Path | str]:
-    if args.inputs is not None:
-        return list(args.inputs)
-    input_dir = Path(args.input_dir)
-    if not input_dir.exists():
-        raise FileNotFoundError(f"Batch input directory does not exist: {input_dir}")
-    if not input_dir.is_dir():
-        raise ValueError(f"Batch input path is not a directory: {input_dir}")
+    return discover_inputs(
+        inputs=args.inputs,
+        input_dir=args.input_dir,
+        patterns=args.input_pattern or ["*.npz", "*.npy"],
+        recursive=bool(args.recursive),
+        input_list=args.input_list,
+        exclude_patterns=args.exclude_pattern,
+    )
 
-    patterns = args.input_pattern or ["*.npz", "*.npy"]
-    discovered: list[Path] = []
-    for pattern in patterns:
-        matches = input_dir.rglob(pattern) if args.recursive else input_dir.glob(pattern)
-        discovered.extend(path for path in matches if path.is_file())
 
-    unique = {str(path): path for path in discovered}
-    return [unique[key] for key in sorted(unique)]
+def _is_batch_mode(args: argparse.Namespace) -> bool:
+    return args.inputs is not None or args.input_dir is not None or args.input_list is not None
+
+
+def _validate_input_mode(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    batch_mode = _is_batch_mode(args)
+    if args.input is not None and batch_mode:
+        parser.error("--input cannot be combined with batch sources.")
+    if args.input is None and not batch_mode:
+        parser.error("one of --input, --inputs, --input-dir, or --input-list is required.")
+    if args.workers <= 0:
+        parser.error("--workers must be positive.")
+    if args.processes_per_gpu <= 0:
+        parser.error("--processes-per-gpu must be positive.")
 
 
 if __name__ == "__main__":

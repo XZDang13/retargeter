@@ -91,20 +91,28 @@ Refine fails by default if `RefinementQualityReport.valid` is false. Use `--allo
 
 `--fps` means input/source FPS override. `--target-fps` resamples SMPL/SMPL-X parameters before FK and controls downstream IK retarget/refinement FPS.
 
-Batch refine runs the same pipeline for many inputs and writes one standard refine directory per clip:
+Batch refine runs the same single-clip pipeline for many inputs and writes one standard refine directory per clip. Parallel batch mode is clip-level multiprocessing; each worker creates its own pipeline instance.
 
 ```bash
 PYTHONPATH=. python -m retargeter.cli.refine \
   --input-dir test_data \
   --input-pattern '*.npz' \
+  --recursive \
   --model-type smplx \
   --target-fps 30 \
   --robot g1_29 \
   --refinement-iterations 50 \
+  --workers 4 \
+  --gpu-ids 0,1 \
+  --resume \
+  --skip-existing \
+  --summary-csv outputs/refine_batch/summary.csv \
   --output outputs/refine_batch
 ```
 
-Batch outputs are written under `outputs/refine_batch/<input_stem>/`. Duplicate stems use `__2`, `__3`, and so on. The batch summary is written to `outputs/refine_batch/batch_manifest.json`; the CLI continues after item failures by default and exits nonzero if any item failed. Use `--fail-fast` to stop after the first failure.
+Batch inputs can also come from `--inputs` or a newline-separated `--input-list`. Batch outputs are written under `outputs/refine_batch/<input_stem>/` by default; duplicate stems use `__2`, `__3`, and so on. With `--preserve-tree`, files discovered under `--input-dir` keep their relative directory layout under the output root.
+
+The restartable manifest is written incrementally to `outputs/refine_batch/batch_manifest.json`. Use `--dry-run` to write the planned manifest without retargeting, `--summary-csv` for a compact table, and `--fail-fast` to stop after the first blocking failure. By default the CLI continues after item failures and exits nonzero if any item failed or quality-invalid item was not allowed.
 
 ### Viewer
 

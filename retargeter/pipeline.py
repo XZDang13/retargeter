@@ -362,76 +362,82 @@ class RefinePipeline:
         refinement_config: Mapping[str, Any] | None = None,
         allow_invalid: bool = False,
         fail_fast: bool = False,
+        workers: int = 1,
+        resume: bool = False,
+        skip_existing: bool = False,
+        overwrite: bool = False,
+        input_dir: Path | str | None = None,
+        preserve_tree: bool = False,
+        dry_run: bool = False,
+        summary_csv: Path | str | None = None,
+        worker_devices: Sequence[str] | None = None,
     ) -> RefineBatchResult:
         inputs = list(input_paths)
         if not inputs:
             raise ValueError("run_batch requires at least one input path.")
 
-        batch_output_dir = Path(output_dir)
-        batch_output_dir.mkdir(parents=True, exist_ok=True)
-        used_names: dict[str, int] = {}
-        items: list[RefineBatchItemResult] = []
+        if workers > 1 and (self.backend_factory is not None or self.refinement_fk_factory is not None):
+            raise ValueError("Injected backend/refinement factories are only supported for workers=1.")
 
-        for input_path in inputs:
-            item_output_dir = _next_batch_output_dir(batch_output_dir, input_path, used_names)
-            try:
-                result = self.run(
-                    input_path=input_path,
-                    output_dir=item_output_dir,
-                    model_type=model_type,
-                    fps=fps,
-                    target_fps=target_fps,
-                    gender=gender,
-                    smpl_model_dir=smpl_model_dir,
-                    device=device,
-                    mock_frames=mock_frames,
-                    return_vertices=return_vertices,
-                    export_human=export_human,
-                    refinement_config=refinement_config,
-                    allow_invalid=allow_invalid,
-                )
-                items.append(
-                    RefineBatchItemResult(
-                        input_path=input_path,
-                        output_dir=item_output_dir,
-                        success=True,
-                        paths=dict(result.paths),
-                        frame_count=result.final_motion.num_frames(),
-                        quality_valid=bool(result.quality_report.valid),
-                    )
-                )
-            except Exception as exc:
-                items.append(
-                    RefineBatchItemResult(
-                        input_path=input_path,
-                        output_dir=item_output_dir,
-                        success=False,
-                        paths={},
-                        frame_count=None,
-                        quality_valid=None,
-                        error_type=type(exc).__name__,
-                        error=str(exc),
-                    )
-                )
-                if fail_fast:
-                    break
+        from retargeter.batch.manifest import summarize, write_summary_csv
+        from retargeter.batch.runner import BatchRefineRunner, build_refine_batch_tasks
+        from retargeter.batch.worker import make_refine_task_processor, process_refine_batch_task
 
-        success_count = sum(1 for item in items if item.success)
-        failure_count = sum(1 for item in items if not item.success)
-        manifest_path = batch_output_dir / "batch_manifest.json"
-        _write_refine_batch_manifest(
-            manifest_path,
+        tasks = build_refine_batch_tasks(
+            inputs,
+            output_dir,
             robot=self.robot,
-            inputs=inputs,
-            items=items,
-            success_count=success_count,
-            failure_count=failure_count,
+            model_type=model_type,
+            fps=fps,
+            target_fps=target_fps,
+            gender=gender,
+            smpl_model_dir=smpl_model_dir,
+            device=device,
+            mock_frames=mock_frames,
+            return_vertices=return_vertices,
+            export_human=export_human,
+            allow_invalid=allow_invalid,
+            preprocess_config=self.config_paths.preprocess_config,
+            scaler_config=self.config_paths.scaler_config,
+            target_config=self.config_paths.target_config,
+            newton_config=self.config_paths.newton_config,
+            refinement_config=dict(refinement_config or {}),
+            input_dir=Path(input_dir) if input_dir is not None else None,
+            preserve_tree=preserve_tree,
+            worker_devices=worker_devices,
         )
+        task_processor = (
+            make_refine_task_processor(
+                backend_factory=self.backend_factory,
+                refinement_fk_factory=self.refinement_fk_factory,
+            )
+            if self.backend_factory is not None or self.refinement_fk_factory is not None
+            else process_refine_batch_task
+        )
+        runner = BatchRefineRunner(
+            manifest_path=Path(output_dir) / "batch_manifest.json",
+            robot=self.robot,
+            allow_invalid=allow_invalid,
+            task_processor=task_processor,
+        )
+        manifest = runner.run(
+            tasks,
+            workers=workers,
+            fail_fast=fail_fast,
+            resume=resume,
+            skip_existing=skip_existing,
+            overwrite=overwrite,
+            dry_run=dry_run,
+        )
+        if summary_csv is not None:
+            write_summary_csv(summary_csv, manifest)
+
+        summary = summarize(manifest)
         return RefineBatchResult(
-            items=items,
-            manifest_path=manifest_path,
-            success_count=success_count,
-            failure_count=failure_count,
+            items=[_batch_record_to_pipeline_result_item(item, allow_invalid=allow_invalid) for item in manifest.items],
+            manifest_path=runner.manifest_path,
+            success_count=summary["success_count"],
+            failure_count=summary["failure_count"],
         )
 
 
@@ -828,6 +834,20 @@ def _retargeted_metadata(
         "preprocess_metadata": dict(preprocess_result.metadata),
         "source": dict(source_metadata),
     }
+
+
+def _batch_record_to_pipeline_result_item(record, *, allow_invalid: bool) -> RefineBatchItemResult:
+    blocking_failure = record.status == "failed" or (record.status == "invalid" and not allow_invalid)
+    return RefineBatchItemResult(
+        input_path=record.input,
+        output_dir=Path(record.output_dir),
+        success=not blocking_failure and record.status not in {"pending", "running"},
+        paths={key: Path(value) for key, value in record.paths.items()},
+        frame_count=record.frame_count,
+        quality_valid=record.quality_valid,
+        error_type=record.error_type,
+        error=record.error,
+    )
 
 
 def _next_batch_output_dir(output_dir: Path, input_path: Path | str, used_names: dict[str, int]) -> Path:

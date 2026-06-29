@@ -255,6 +255,62 @@ def test_refine_cli_batch_records_failure_and_continues(tmp_path: Path):
     assert manifest["items"][1]["error"] is None
 
 
+def test_refine_cli_batch_input_list_dry_run_and_summary_csv(tmp_path: Path):
+    output = tmp_path / "batch_plan"
+    summary_csv = output / "summary.csv"
+    input_list = tmp_path / "inputs.txt"
+    input_list.write_text("\n# comment\nmock\nmock\n", encoding="utf-8")
+
+    assert refine.main(
+        [
+            "--input-list",
+            str(input_list),
+            "--output",
+            str(output),
+            "--dry-run",
+            "--summary-csv",
+            str(summary_csv),
+        ],
+        backend_factory=MockBackend,
+        refinement_fk_factory=lambda spec: FakeTorchFK(spec),
+    ) == 0
+
+    manifest = json.loads((output / "batch_manifest.json").read_text(encoding="utf-8"))
+    assert [Path(item["output_dir"]).name for item in manifest["items"]] == ["mock", "mock__2"]
+    assert [item["status"] for item in manifest["items"]] == ["pending", "pending"]
+    assert summary_csv.exists()
+    assert summary_csv.read_text(encoding="utf-8").splitlines()[0].startswith("input,output_dir,status")
+    assert not (output / "mock").exists()
+
+
+def test_refine_cli_batch_preserve_tree_dry_run(tmp_path: Path):
+    input_dir = tmp_path / "data"
+    nested = input_dir / "a"
+    nested.mkdir(parents=True)
+    walk = nested / "walk.npz"
+    walk.touch()
+    output = tmp_path / "batch_tree"
+
+    assert refine.main(
+        [
+            "--input-dir",
+            str(input_dir),
+            "--input-pattern",
+            "*.npz",
+            "--recursive",
+            "--preserve-tree",
+            "--output",
+            str(output),
+            "--dry-run",
+        ]
+    ) == 0
+
+    manifest = json.loads((output / "batch_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["input_count"] == 1
+    assert Path(manifest["items"][0]["output_dir"]) == output / "a" / "walk"
+    assert manifest["items"][0]["status"] == "pending"
+
+
 def test_refine_pipeline_run_batch_returns_lightweight_results(tmp_path: Path):
     result = RefinePipeline(
         robot="g1_29",
