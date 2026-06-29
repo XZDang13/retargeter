@@ -205,7 +205,7 @@ class NewtonBackend:
         return body_state
 
     def state_to_full_q(self, state: IKState) -> np.ndarray:
-        """Return a full Newton joint_q vector for an actuated Stage 1 state."""
+        """Return a full Newton joint_q vector for an actuated IK retarget state."""
         self._ensure_loaded()
         state.validate(self.robot_spec)
         return self._state_to_full_q(state)

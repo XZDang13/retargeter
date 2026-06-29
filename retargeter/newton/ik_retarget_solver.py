@@ -8,16 +8,19 @@ import numpy as np
 
 from retargeter.preprocess import CanonicalHumanMotion, FootContactResult
 from retargeter.preprocess.lowpass import normalize_quat_xyzw
-from retargeter.scale import IKTargetSet, Stage1TargetBuilder
+from retargeter.scale import IKTargetBuilder, IKTargetSet
 
 from .newton_backend import BackendSolveResult, IKBackend, IKState, NewtonBackend, NewtonSolveSettings, RobotBodyState
 from .objectives import build_regularization_objectives, build_target_objectives
-from .postprocess import PostprocessReport, apply_stage1_postprocess
+from .postprocess import PostprocessReport, apply_ik_postprocess
 from .robot_spec import RobotSpec
 
 
+IK_PASS_NAMES = ("coarse_alignment", "full_body_tracking")
+
+
 @dataclass
-class Stage1FrameResult:
+class IKRetargetFrameResult:
     frame_idx: int
     robot: str
     root_pos_w: np.ndarray
@@ -37,14 +40,14 @@ class Stage1FrameResult:
         )
 
 
-class Stage1NewtonSolver:
+class NewtonIKRetargetSolver:
     def __init__(
         self,
         stage_config_path: Path | str,
         *,
         robot_config_path: Path | str | None = None,
         backend: IKBackend | None = None,
-        target_builder: Stage1TargetBuilder | None = None,
+        target_builder: IKTargetBuilder | None = None,
     ):
         self.stage_config_path = Path(stage_config_path)
         self.config = _load_yaml(self.stage_config_path)
@@ -62,13 +65,13 @@ class Stage1NewtonSolver:
 
         self.target_builder = target_builder
         if self.target_builder is None:
-            self.target_builder = Stage1TargetBuilder(
+            self.target_builder = IKTargetBuilder(
                 _resolve_path(str(self.config["scaler_config"]), self.stage_config_path),
                 _resolve_path(str(self.config["target_config"]), self.stage_config_path),
             )
 
-        self.robot_spec.require_body_names(self.target_builder.required_robot_body_names("stage1a"))
-        self.robot_spec.require_body_names(self.target_builder.required_robot_body_names("stage1b"))
+        self.robot_spec.require_body_names(self.target_builder.required_robot_body_names("coarse_alignment"))
+        self.robot_spec.require_body_names(self.target_builder.required_robot_body_names("full_body_tracking"))
 
     def solve_frame(
         self,
@@ -76,13 +79,13 @@ class Stage1NewtonSolver:
         frame_idx: int,
         *,
         contact_result: FootContactResult | None = None,
-        previous_result: Stage1FrameResult | None = None,
-    ) -> Stage1FrameResult:
-        stage1a_targets = self.target_builder.build(motion, frame_idx, "stage1a", contact_result=contact_result)
-        stage1b_targets = self.target_builder.build(motion, frame_idx, "stage1b", contact_result=contact_result)
+        previous_result: IKRetargetFrameResult | None = None,
+    ) -> IKRetargetFrameResult:
+        coarse_targets = self.target_builder.build(motion, frame_idx, "coarse_alignment", contact_result=contact_result)
+        tracking_targets = self.target_builder.build(motion, frame_idx, "full_body_tracking", contact_result=contact_result)
         return self.solve_target_sets(
-            stage1a_targets,
-            stage1b_targets,
+            coarse_targets,
+            tracking_targets,
             frame_idx=frame_idx,
             fps=float(motion.fps),
             previous_result=previous_result,
@@ -90,48 +93,46 @@ class Stage1NewtonSolver:
 
     def solve_target_sets(
         self,
-        stage1a_targets: IKTargetSet,
-        stage1b_targets: IKTargetSet,
+        coarse_targets: IKTargetSet,
+        tracking_targets: IKTargetSet,
         *,
         frame_idx: int,
         fps: float,
-        previous_result: Stage1FrameResult | None = None,
-    ) -> Stage1FrameResult:
-        if stage1a_targets.stage_name != "stage1a":
-            raise ValueError("stage1a_targets must have stage_name 'stage1a'.")
-        if stage1b_targets.stage_name != "stage1b":
-            raise ValueError("stage1b_targets must have stage_name 'stage1b'.")
-        stage1a_targets.validate()
-        stage1b_targets.validate()
+        previous_result: IKRetargetFrameResult | None = None,
+    ) -> IKRetargetFrameResult:
+        coarse_targets = _target_set_with_pass_name(coarse_targets, "coarse_alignment")
+        tracking_targets = _target_set_with_pass_name(tracking_targets, "full_body_tracking")
+        coarse_targets.validate()
+        tracking_targets.validate()
         if fps <= 0.0 or not np.isfinite(fps):
             raise ValueError(f"fps must be positive and finite, got {fps!r}.")
 
         previous_state = previous_result.state() if previous_result is not None else None
-        seed_state = self._initial_state(stage1a_targets, previous_state)
+        seed_state = self._initial_state(coarse_targets, previous_state)
         previous_joint_pos = previous_state.joint_pos if previous_state is not None else None
         dt = 1.0 / float(fps)
 
-        stage1a_result = self._solve_stage(
-            stage1a_targets,
+        coarse_result = self._solve_pass(
+            coarse_targets,
             seed_state,
-            stage_name="stage1a",
+            pass_name="coarse_alignment",
             previous_joint_pos=previous_joint_pos,
             dt=dt,
         )
-        stage1a_state = stage1a_result.state
-        if not stage1a_result.success and self._fallback_on_failure:
-            stage1a_state = seed_state
+        coarse_state = coarse_result.state
+        if not coarse_result.success and self._fallback_on_failure:
+            coarse_state = seed_state
 
-        stage1b_result = self._solve_stage(
-            stage1b_targets,
-            stage1a_state,
-            stage_name="stage1b",
+        tracking_result = self._solve_pass(
+            tracking_targets,
+            coarse_state,
+            pass_name="full_body_tracking",
             previous_joint_pos=previous_joint_pos,
             dt=dt,
         )
-        final_state = stage1b_result.state
-        if not stage1b_result.success and self._fallback_on_failure:
-            final_state = stage1a_state
+        final_state = tracking_result.state
+        if not tracking_result.success and self._fallback_on_failure:
+            final_state = coarse_state
 
         final_state = final_state.copy()
         joint_vel = np.zeros(self.robot_spec.num_dofs, dtype=np.float64)
@@ -139,18 +140,18 @@ class Stage1NewtonSolver:
             joint_vel = (final_state.joint_pos - previous_joint_pos) / dt
 
         body_state = self.backend.forward_kinematics(final_state)
-        success = bool(stage1a_result.success and stage1b_result.success)
+        success = bool(coarse_result.success and tracking_result.success)
         diagnostics = {
-            "stage1a": _backend_result_diagnostics(stage1a_result),
-            "stage1b": _backend_result_diagnostics(stage1b_result),
+            "coarse_alignment": _backend_result_diagnostics(coarse_result),
+            "full_body_tracking": _backend_result_diagnostics(tracking_result),
             "fallback_used": bool((not success) and self._fallback_on_failure),
             "target_counts": {
-                "stage1a": len(stage1a_targets.targets),
-                "stage1b": len(stage1b_targets.targets),
+                "coarse_alignment": len(coarse_targets.targets),
+                "full_body_tracking": len(tracking_targets.targets),
             },
         }
 
-        return Stage1FrameResult(
+        return IKRetargetFrameResult(
             frame_idx=int(frame_idx),
             robot=self.robot_spec.robot,
             root_pos_w=final_state.root_pos_w.copy(),
@@ -163,12 +164,12 @@ class Stage1NewtonSolver:
             diagnostics=diagnostics,
         )
 
-    def _solve_stage(
+    def _solve_pass(
         self,
         target_set: IKTargetSet,
         seed_state: IKState,
         *,
-        stage_name: str,
+        pass_name: str,
         previous_joint_pos: np.ndarray | None,
         dt: float,
     ) -> BackendSolveResult:
@@ -181,10 +182,10 @@ class Stage1NewtonSolver:
             damping_weight=self._objective_weight("damping_weight"),
             previous_joint_pos=previous_joint_pos,
         )
-        settings = self._solve_settings(stage_name)
+        settings = self._solve_settings(pass_name)
         result = self.backend.solve_ik(seed_state, objectives, settings)
 
-        q, report = apply_stage1_postprocess(
+        q, report = apply_ik_postprocess(
             result.state.joint_pos,
             self.robot_spec,
             previous_joint_pos=previous_joint_pos,
@@ -232,10 +233,10 @@ class Stage1NewtonSolver:
         state.validate(self.robot_spec)
         return state
 
-    def _solve_settings(self, stage_name: str) -> NewtonSolveSettings:
+    def _solve_settings(self, pass_name: str) -> NewtonSolveSettings:
         solver_config = self.config["solver"]
         iterations_config = solver_config.get("iterations", {})
-        iterations = int(iterations_config.get(stage_name, solver_config.get("default_iterations", 24)))
+        iterations = int(iterations_config.get(pass_name, solver_config.get("default_iterations", 24)))
         return NewtonSolveSettings(
             iterations=iterations,
             step_size=float(solver_config.get("step_size", 1.0)),
@@ -252,11 +253,26 @@ class Stage1NewtonSolver:
         return bool(self.config["solver"].get("fallback_on_failure", True))
 
 
-def load_stage1_newton_config(path: Path | str) -> dict[str, Any]:
+def load_newton_ik_config(path: Path | str) -> dict[str, Any]:
     config_path = Path(path)
     config = _load_yaml(config_path)
     _validate_stage_config(config, config_path)
     return config
+
+
+def _canonical_pass_name(pass_name: str) -> str:
+    if pass_name not in IK_PASS_NAMES:
+        raise ValueError(f"IK pass name must be one of {sorted(IK_PASS_NAMES)}, got {pass_name!r}.")
+    return pass_name
+
+
+def _target_set_with_pass_name(target_set: IKTargetSet, expected_pass_name: str) -> IKTargetSet:
+    actual = _canonical_pass_name(target_set.pass_name)
+    if actual != expected_pass_name:
+        raise ValueError(f"{expected_pass_name}_targets must have pass_name {expected_pass_name!r}.")
+    if target_set.pass_name == actual:
+        return target_set
+    return IKTargetSet(targets=list(target_set.targets), pass_name=actual, metadata=dict(target_set.metadata))
 
 
 def _backend_result_diagnostics(result: BackendSolveResult) -> dict[str, Any]:
@@ -282,11 +298,11 @@ def _load_yaml(path: Path) -> dict[str, Any]:
     try:
         import yaml
     except ImportError as exc:
-        raise RuntimeError("PyYAML is required to load Newton stage configs.") from exc
+        raise RuntimeError("PyYAML is required to load Newton IK configs.") from exc
     with path.open("r", encoding="utf-8") as f:
         data = yaml.safe_load(f) or {}
     if not isinstance(data, dict):
-        raise ValueError(f"Newton stage config {path} must contain a YAML mapping.")
+        raise ValueError(f"Newton IK config {path} must contain a YAML mapping.")
     return data
 
 
@@ -294,11 +310,17 @@ def _validate_stage_config(config: dict[str, Any], path: Path) -> None:
     required = ["robot_config", "scaler_config", "target_config", "solver", "objectives", "postprocess"]
     missing = [section for section in required if section not in config]
     if missing:
-        raise ValueError(f"Newton stage config {path} is missing required sections: {missing}.")
+        raise ValueError(f"Newton IK config {path} is missing required sections: {missing}.")
 
     iterations = config["solver"].get("iterations", {})
-    if not isinstance(iterations, dict) or "stage1a" not in iterations or "stage1b" not in iterations:
-        raise ValueError(f"Newton stage config {path} solver.iterations must define stage1a and stage1b.")
+    if not isinstance(iterations, dict):
+        raise ValueError(f"Newton IK config {path} solver.iterations must be a mapping.")
+    normalized = {_canonical_pass_name(name): value for name, value in iterations.items()}
+    if any(name not in normalized for name in IK_PASS_NAMES):
+        raise ValueError(
+            f"Newton IK config {path} solver.iterations must define coarse_alignment and full_body_tracking."
+        )
+    config["solver"]["iterations"] = normalized
 
 
 def _resolve_path(raw_path: str, config_path: Path) -> Path:

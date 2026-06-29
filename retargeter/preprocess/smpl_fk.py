@@ -5,7 +5,7 @@ from typing import Literal
 
 import numpy as np
 
-from .canonical import CanonicalHumanMotion, REQUIRED_STAGE1_BODY_NAMES
+from .canonical import CanonicalHumanMotion, REQUIRED_CANONICAL_BODY_NAMES
 from .smpl_motion import SMPLMotion
 
 try:
@@ -112,9 +112,9 @@ class SMPLForwardKinematics:
             mesh_faces = np.asarray(self.model.faces, dtype=np.int32).copy()
 
         global_joint_quats = self._global_joint_quats_xyzw(motion)
-        body_pos = np.stack([joints[:, self._body_index(name), :] for name in REQUIRED_STAGE1_BODY_NAMES], axis=1)
+        body_pos = np.stack([joints[:, self._body_index(name), :] for name in REQUIRED_CANONICAL_BODY_NAMES], axis=1)
         body_quat = np.stack(
-            [global_joint_quats[:, self._orientation_source_joint(name), :] for name in REQUIRED_STAGE1_BODY_NAMES],
+            [global_joint_quats[:, self._orientation_source_joint(name), :] for name in REQUIRED_CANONICAL_BODY_NAMES],
             axis=1,
         )
 
@@ -126,7 +126,7 @@ class SMPLForwardKinematics:
 
         canonical = CanonicalHumanMotion(
             fps=motion.fps,
-            body_names=list(REQUIRED_STAGE1_BODY_NAMES),
+            body_names=list(REQUIRED_CANONICAL_BODY_NAMES),
             body_pos_w=body_pos,
             body_quat_xyzw=body_quat,
             vertices_w=vertices,
@@ -139,7 +139,7 @@ class SMPLForwardKinematics:
                 "foot_vertex_config": self.foot_vertex_config,
             },
         )
-        canonical.validate(required_bodies=REQUIRED_STAGE1_BODY_NAMES)
+        canonical.validate(required_bodies=REQUIRED_CANONICAL_BODY_NAMES)
         return canonical
 
     def _resolve_model_root(self) -> Path:

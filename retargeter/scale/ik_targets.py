@@ -61,7 +61,7 @@ class BodyIKTarget:
 
 @dataclass
 class IKTargetSet:
-    stage_name: Literal["stage1a", "stage1b"]
+    pass_name: Literal["coarse_alignment", "full_body_tracking"]
     targets: list[BodyIKTarget]
     metadata: dict = field(default_factory=dict)
 
@@ -75,11 +75,14 @@ class IKTargetSet:
         for target in self.targets:
             if target.semantic_name == semantic_name:
                 return target
-        raise KeyError(f"Target {semantic_name!r} is not present in {self.stage_name}.")
+        raise KeyError(f"Target {semantic_name!r} is not present in {self.pass_name}.")
 
     def validate(self) -> None:
-        if self.stage_name not in {"stage1a", "stage1b"}:
-            raise ValueError(f"stage_name must be 'stage1a' or 'stage1b', got {self.stage_name!r}.")
+        if self.pass_name not in {"coarse_alignment", "full_body_tracking"}:
+            raise ValueError(
+                "pass_name must be 'coarse_alignment' or 'full_body_tracking' "
+                f"got {self.pass_name!r}."
+            )
         seen = set()
         for target in self.targets:
             target.validate()

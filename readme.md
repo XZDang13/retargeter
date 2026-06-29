@@ -1,40 +1,14 @@
 # retargeter
 
-`retargeter` is an offline Stage 1 motion-retargeting pipeline for converting SMPL/SMPL-X human motion into Unitree G1 joint trajectories with Newton IK.
+`retargeter` converts SMPL/SMPL-X human motion into Unitree G1 robot motion through three main interfaces:
 
-The current implementation is a practical baseline. It supports preprocessing SMPL motion, scaling human body targets to G1 body targets, solving a two-pass Newton IK problem, clamping joint limits and joint velocities, exporting `.npz` motion files, and replaying the result through Newton viewers.
+- `online`: realtime-style IK retargeting, one frame at a time.
+- `refine`: offline training-data preparation, IK retargeting plus Torch refinement.
+- `viewer`: replay online or refined outputs with Newton viewers and optional SMPL-X mesh overlay.
 
-## Supported Robots
-
-- `unitree_g1_29` / `g1_29`: 29 actuated joints, backed by `assets/robots/unitree_g1/g1_29_dof/g1_mocap.usda`
-- `unitree_g1_23` / `g1_23`: 23 actuated joints, backed by `assets/robots/unitree_g1/g1_23_dof/g1_23dof.usda`
-
-Robot specs, joint limits, velocity limits, and default poses live in:
-
-```bash
-retargeter/newton/configs/g1_29_robot.yaml
-retargeter/newton/configs/g1_23_robot.yaml
-```
-
-## Repository Layout
-
-```bash
-retargeter/
-  cli/          # Command-line entry points
-  preprocess/   # SMPL/SMPL-X loading, FK, canonicalization, filtering, contacts
-  scale/        # Human-to-robot body scaling and IK target construction
-  newton/       # Robot specs, Newton backend, Stage 1 solver, export
-  visualize/    # Newton replay and diagnostic plots
-assets/
-  body_models/  # SMPL/SMPL-X model files
-  robots/       # Unitree G1 USD assets
-tests/          # Unit and smoke tests
-test_data/      # Local sample motions
-```
+Run commands from the repository root with `PYTHONPATH=.`.
 
 ## Requirements
-
-Run commands from the repository root with `PYTHONPATH=.`. There is no package metadata file yet, so install the runtime dependencies directly into your environment.
 
 Core dependencies:
 
@@ -48,213 +22,207 @@ Real SMPL/SMPL-X input requires:
 python -m pip install torch smplx
 ```
 
-Real Newton IK and replay require `newton` and `warp` installed in the active environment.
+Real Newton IK and replay require `newton` and `warp` in the active environment. SMPL-X model files are expected under `assets/body_models/smplx/` unless `--smpl-model-dir` points at another model directory.
 
-The default SMPL model directory is:
+## Main Interfaces
 
-```bash
-assets/body_models
+### Online Mode
+
+Online mode is the IK-retarget-only path. The Python API is the realtime interface:
+
+```python
+from retargeter import OnlineRetargeter
+
+retargeter = OnlineRetargeter(robot="g1_29")
+frame_result = retargeter.step(canonical_motion, frame_idx, contact_result=contact)
+retargeter.reset()
 ```
 
-For SMPL-X, the loader expects model files under either `assets/body_models/smplx/` or a direct `smplx` model directory passed with `--smpl-model-dir`.
-
-## Quick Smoke Test
-
-Use mock human motion to verify the pipeline wiring:
+The CLI simulates the online loop over a mock or file input and writes an online artifact layout:
 
 ```bash
-PYTHONPATH=. python -m retargeter.cli.retarget_stage1 \
+PYTHONPATH=. python -m retargeter.cli.online \
   --input mock \
   --robot g1_29 \
-  --output outputs/mock_g1_29 \
-  --mock-frames 60 \
-  --visualize 1 \
-  --newton-viewer file
+  --output outputs/online_mock \
+  --mock-frames 60
 ```
 
-Expected outputs:
+Outputs:
 
 ```bash
-outputs/mock_g1_29/motion.npz
-outputs/mock_g1_29/meta.yaml
-outputs/mock_g1_29/quality.json
-outputs/mock_g1_29/newton_replay.json
-outputs/mock_g1_29/*.png
+outputs/online_mock/online_motion.npz
+outputs/online_mock/online_meta.yaml
+outputs/online_mock/online_quality.json
 ```
 
-## Retarget a SMPL-X Motion
+Online mode does not run refinement and does not accept refinement options.
 
-For `.npz` motion files:
+### Refine Mode
+
+Refine mode prepares training data. It runs SMPL/SMPL-X preprocessing, Newton IK retargeting, Torch refinement, and refinement quality evaluation.
 
 ```bash
-PYTHONPATH=. python -m retargeter.cli.retarget_stage1 \
+PYTHONPATH=. python -m retargeter.cli.refine \
   --input test_data/05_05_stageii.npz \
   --model-type smplx \
   --smpl-model-dir assets/body_models \
+  --target-fps 30 \
   --robot g1_29 \
-  --output outputs/05_05_g1_29 \
-  --visualize 1 \
-  --newton-viewer file
+  --refinement-iterations 50 \
+  --output outputs/05_05_refine
 ```
 
-To replay the robot beside the source SMPL-X mesh later, also export the preprocessed canonical human motion:
+Outputs:
 
 ```bash
-PYTHONPATH=. python -m retargeter.cli.retarget_stage1 \
-  --input test_data/05_01_stageii.npz \
+outputs/05_05_refine/final_motion.npz
+outputs/05_05_refine/final_meta.yaml
+outputs/05_05_refine/final_quality.json
+outputs/05_05_refine/retargeted_motion.npz
+outputs/05_05_refine/retargeted_meta.yaml
+outputs/05_05_refine/retargeted_quality.json
+outputs/05_05_refine/human.npz
+```
+
+`final_motion.npz` is the refinement training-data product. IK retarget files are kept for audit and comparison. `human.npz` is exported by default for real SMPL/SMPL-X inputs with mesh vertices; use `--no-human-output` to skip it.
+
+Refine fails by default if `RefinementQualityReport.valid` is false. Use `--allow-invalid` to keep invalid outputs for debugging.
+
+`--fps` means input/source FPS override. `--target-fps` resamples SMPL/SMPL-X parameters before FK and controls downstream IK retarget/refinement FPS.
+
+Batch refine runs the same pipeline for many inputs and writes one standard refine directory per clip:
+
+```bash
+PYTHONPATH=. python -m retargeter.cli.refine \
+  --input-dir test_data \
+  --input-pattern '*.npz' \
   --model-type smplx \
-  --smpl-model-dir assets/body_models \
-  --robot g1_23 \
-  --output outputs/05_01_g1_23 \
-  --human-output outputs/05_01_g1_23/human.npz \
-  --visualize 0
+  --target-fps 30 \
+  --robot g1_29 \
+  --refinement-iterations 50 \
+  --output outputs/refine_batch
 ```
 
-`--human-output` requires real SMPL/SMPL-X input with vertices. Do not combine it with `--input mock` or `--no-vertices`.
+Batch outputs are written under `outputs/refine_batch/<input_stem>/`. Duplicate stems use `__2`, `__3`, and so on. The batch summary is written to `outputs/refine_batch/batch_manifest.json`; the CLI continues after item failures by default and exits nonzero if any item failed. Use `--fail-fast` to stop after the first failure.
 
-For PHUMA-style `.npy` files, pass FPS explicitly:
+### Viewer
+
+Viewer mode replays outputs from online or refine mode. It can take an output directory or a single motion `.npz`.
 
 ```bash
-PYTHONPATH=. python -m retargeter.cli.retarget_stage1 \
-  --input path/to/motion.npy \
-  --model-type smplx \
-  --fps 30 \
-  --smpl-model-dir assets/body_models \
-  --robot g1_23 \
-  --output outputs/motion_g1_23
+PYTHONPATH=. python -m retargeter.cli.viewer \
+  --input outputs/05_05_refine \
+  --viewer gl \
+  --realtime 1
 ```
 
-The `.npz` loader accepts common SMPL/SMPL-X keys:
-
-- Translation: `transl` or `trans`
-- Root orientation: `global_orient`, `root_orient`, or `poses[:, 0:3]`
-- Body pose: `body_pose`, `pose_body`, or `poses[:, 3:66]`
-- FPS: `mocap_frame_rate`, or use `--fps`
-- Optional: `betas`, `gender`, hand poses, eye poses, jaw pose, expression
-
-## Pipeline Details
-
-The Stage 1 command performs:
-
-1. Load SMPL/SMPL-X `.npz` or `.npy` motion, or generate `mock` motion.
-2. Run SMPL/SMPL-X forward kinematics into a canonical 21-body human representation.
-3. Apply low-pass filtering, ground estimation, and foot-contact estimation.
-4. Build scaled G1 IK targets from `retargeter/scale/configs/*`.
-5. Solve two Newton IK passes, `stage1a` then `stage1b`.
-6. Clamp joint limits and frame-to-frame joint velocity.
-7. Export motion, metadata, quality, and optional visual diagnostics.
-
-Stage configs:
+Directory input priority is:
 
 ```bash
-retargeter/newton/configs/g1_29_newton_stage1.yaml
-retargeter/newton/configs/g1_23_newton_stage1.yaml
+final_motion.npz -> online_motion.npz -> retargeted_motion.npz
 ```
 
-Scaling and target configs:
+If the directory contains `human.npz`, viewer uses it automatically as a SMPL-X mesh overlay. You can also pass it explicitly:
 
 ```bash
-retargeter/scale/configs/g1_29_scaler.yaml
-retargeter/scale/configs/g1_29_stage1_targets.yaml
-retargeter/scale/configs/g1_23_scaler.yaml
-retargeter/scale/configs/g1_23_stage1_targets.yaml
-```
-
-## Output Format
-
-`motion.npz` contains:
-
-- `fps`: scalar motion FPS
-- `robot`: robot name
-- `joint_names`: ordered actuated joint names
-- `root_pos_w`: `[T, 3]`
-- `root_quat_xyzw`: `[T, 4]`
-- `joint_pos`: `[T, D]`
-- `joint_vel`: `[T, D]`
-- `body_names`: ordered robot body names
-- `body_pos_w`: `[T, B, 3]`
-- `body_quat_xyzw`: `[T, B, 4]`
-- `success`: `[T]` boolean IK success flags
-
-`meta.yaml` records robot, FPS, frame count, joint/body names, config paths, source metadata, and preprocess metadata.
-
-`quality.json` records frame count, success count, success ratio, max absolute joint velocity, and per-frame diagnostics.
-
-An optional human replay `.npz` from `--human-output` contains:
-
-- `fps`: scalar human motion FPS
-- `body_names`: canonical 21-body human names
-- `body_pos_w`: `[T, 21, 3]`
-- `body_quat_xyzw`: `[T, 21, 4]`
-- `vertices_w`: `[T, V, 3]` SMPL/SMPL-X mesh vertices
-- `mesh_faces`: `[F, 3]` mesh triangle indices
-- Optional contact diagnostics used by plot mode
-
-## Visualization
-
-Replay an exported Stage 1 motion:
-
-```bash
-PYTHONPATH=. python -m retargeter.cli.visualize_stage1 \
-  --stage1 outputs/mock_g1_29/motion.npz \
-  --robot-spec retargeter/newton/configs/g1_29_robot.yaml \
-  --output outputs/mock_g1_29_replay \
-  --mode all \
-  --viewer file
-```
-
-Viewer choices:
-
-- `file`: writes a Newton replay JSON file
-- `usd`: writes a USD replay
-- `viser`: starts Newton ViewerViser
-- `gl`: starts Newton ViewerGL
-- `null`: headless replay smoke test
-
-Replay the robot and the source SMPL-X mesh side by side:
-
-```bash
-PYTHONPATH=. python -m retargeter.cli.visualize_stage1 \
-  --stage1 outputs/05_01_g1_23/motion.npz \
-  --human outputs/05_01_g1_23/human.npz \
-  --robot-spec retargeter/newton/configs/g1_23_robot.yaml \
-  --output outputs/05_01_g1_23/overlay_gl \
-  --mode replay \
+PYTHONPATH=. python -m retargeter.cli.viewer \
+  --input outputs/05_05_refine/final_motion.npz \
+  --human outputs/05_05_refine/human.npz \
   --viewer gl \
   --human-offset 0,1.25,0 \
   --realtime 1
 ```
 
-Human overlay is optional. Without `--human`, replay only renders the robot. With `--human`, replay requires `vertices_w` and `mesh_faces` in the human npz and raises a clear error if either field is missing. Frames are synchronized by timestamp, so different robot and human FPS values are supported. The default mesh offset is `0,1.25,0`, placing the human on the robot's left side in the world `+Y` direction.
+Viewer choices:
 
-For Viser:
+- `file`: writes `newton_replay.json`
+- `usd`: writes `newton_replay.usd`
+- `viser`: starts Newton ViewerViser
+- `gl`: starts Newton ViewerGL
+- `null`: headless replay smoke test
+
+Viewer only loads and displays motion. It does not run IK, optimize, or modify motion files.
+
+## Output Format
+
+IK retarget-style online outputs contain:
+
+- `fps`
+- `robot`
+- `joint_names`
+- `root_pos_w`: `[T, 3]`
+- `root_quat_xyzw`: `[T, 4]`
+- `joint_pos`: `[T, D]`
+- `joint_vel`: `[T, D]`
+- `body_names`
+- `body_pos_w`: `[T, B, 3]`
+- `body_quat_xyzw`: `[T, B, 4]`
+- `success`: `[T]`
+
+Refine `final_motion.npz` contains the same root, joint, and body state arrays plus:
+
+- `root_delta`: `[T, 3]`
+- `joint_delta`: `[T, D]`
+
+`human.npz` contains canonical 21-body human motion and, when available, SMPL/SMPL-X mesh fields:
+
+- `vertices_w`: `[T, V, 3]`
+- `mesh_faces`: `[F, 3]`
+- contact diagnostics for plotting and quality evaluation
+
+Refinement skating uses PHUMA-style soft-contact horizontal foot velocity: each contact point is normalized over positive-contact frames so airborne frames do not dilute the penalty. The default skating weight is tuned for this pipeline's stricter "do not worsen retargeted-motion skating" quality gate and can be overridden with `--refinement-config`.
+
+## Supported Robots
+
+- `unitree_g1_29` / `g1_29`: 29 actuated joints
+- `unitree_g1_23` / `g1_23`: 23 actuated joints
+
+Robot specs:
 
 ```bash
-PYTHONPATH=. python -m retargeter.cli.visualize_stage1 \
-  --stage1 outputs/mock_g1_29/motion.npz \
-  --robot-spec retargeter/newton/configs/g1_29_robot.yaml \
-  --output outputs/viser \
-  --mode replay \
-  --viewer viser \
-  --port 8080 \
-  --loop 1 \
-  --realtime 1
+retargeter/newton/configs/g1_29_robot.yaml
+retargeter/newton/configs/g1_23_robot.yaml
 ```
 
-## Testing
+IK retargeting configs:
 
-Run the test suite from the repository root:
+```bash
+retargeter/newton/configs/g1_29_newton_ik.yaml
+retargeter/newton/configs/g1_23_newton_ik.yaml
+retargeter/scale/configs/g1_29_scaler.yaml
+retargeter/scale/configs/g1_29_ik_targets.yaml
+retargeter/scale/configs/g1_23_scaler.yaml
+retargeter/scale/configs/g1_23_ik_targets.yaml
+```
+
+## Debug Preprocessing
+
+The standalone SMPL/SMPL-X preprocessing CLI remains available for debugging:
+
+```bash
+PYTHONPATH=. python -m retargeter.cli.preprocess_smpl \
+  --input test_data/05_05_stageii.npz \
+  --model-type smplx \
+  --smpl-model-dir assets/body_models \
+  --target-fps 30 \
+  --output outputs/05_05_preprocess
+```
+
+This is not a main pipeline interface; use `online`, `refine`, or `viewer` for normal workflows.
+
+## Testing
 
 ```bash
 PYTHONPATH=. pytest -q
 ```
 
-The tests use mocks where possible. Tests that need the real Newton backend call `pytest.importorskip("newton")`.
+The tests use mocks where possible. Tests that need real Newton use `pytest.importorskip("newton")`.
 
-## Notes and Limitations
+## Notes
 
-- This project is for offline retargeting. It does not upload motions to a robot or run a live deployment server.
-- The current solver is a Stage 1 baseline, not a polished production-quality retargeter.
-- Output joint order is defined by the selected robot spec and must be preserved by downstream consumers.
+- Online mode is an IK retarget realtime API; it is not a teleop server or robot upload path.
+- Refine mode is offline and intended for training-data preparation.
+- Viewer is read-only.
 - Quaternion arrays use `xyzw` order.
 - The default world frame is `z_up`.

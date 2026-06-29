@@ -6,11 +6,11 @@ import numpy as np
 import pytest
 
 from conftest import make_canonical_motion
-from retargeter.newton import IKState, RobotSpec, Stage1Motion
+from retargeter.newton import IKState, RobotSpec, RetargetedMotion
 from retargeter.visualize import (
-    replay_stage1_motion_with_newton,
-    stage1_frame_to_ik_state,
-    validate_stage1_motion_for_robot,
+    motion_frame_to_ik_state,
+    replay_motion_with_newton,
+    validate_replay_motion_for_robot,
 )
 
 
@@ -71,11 +71,11 @@ class FakeViewer:
         self.closed = True
 
 
-def test_stage1_frame_to_ik_state_validates_order_and_copies_arrays():
+def test_motion_frame_to_ik_state_validates_order_and_copies_arrays():
     spec = RobotSpec.from_yaml(G1_29_ROBOT)
-    motion = _make_stage1_motion(spec, num_frames=3)
+    motion = _make_retargeted_motion(spec, num_frames=3)
 
-    state = stage1_frame_to_ik_state(motion, spec, 1)
+    state = motion_frame_to_ik_state(motion, spec, 1)
 
     assert np.allclose(state.root_pos_w, motion.root_pos_w[1])
     assert np.allclose(state.joint_pos, motion.joint_pos[1])
@@ -83,26 +83,26 @@ def test_stage1_frame_to_ik_state_validates_order_and_copies_arrays():
     assert not np.allclose(motion.joint_pos[1], 10.0)
 
 
-def test_stage1_frame_to_ik_state_rejects_bad_frame():
+def test_motion_frame_to_ik_state_rejects_bad_frame():
     spec = RobotSpec.from_yaml(G1_29_ROBOT)
-    motion = _make_stage1_motion(spec, num_frames=1)
+    motion = _make_retargeted_motion(spec, num_frames=1)
 
     with pytest.raises(IndexError):
-        stage1_frame_to_ik_state(motion, spec, 2)
+        motion_frame_to_ik_state(motion, spec, 2)
 
 
-def test_validate_stage1_motion_for_robot_rejects_joint_mismatch():
+def test_validate_replay_motion_for_robot_rejects_joint_mismatch():
     spec = RobotSpec.from_yaml(G1_29_ROBOT)
-    motion = _make_stage1_motion(spec, num_frames=1)
+    motion = _make_retargeted_motion(spec, num_frames=1)
     motion.joint_names = list(reversed(motion.joint_names))
 
     with pytest.raises(ValueError, match="joint_names"):
-        validate_stage1_motion_for_robot(motion, spec)
+        validate_replay_motion_for_robot(motion, spec)
 
 
-def test_replay_stage1_motion_uses_newton_viewer_api(tmp_path: Path):
+def test_replay_motion_uses_newton_viewer_api(tmp_path: Path):
     spec = RobotSpec.from_yaml(G1_29_ROBOT)
-    motion = _make_stage1_motion(spec, num_frames=4)
+    motion = _make_retargeted_motion(spec, num_frames=4)
     backend = FakeReplayBackend(spec)
     created = []
 
@@ -112,7 +112,7 @@ def test_replay_stage1_motion_uses_newton_viewer_api(tmp_path: Path):
         return fake
 
     output = tmp_path / "replay.json"
-    result = replay_stage1_motion_with_newton(
+    result = replay_motion_with_newton(
         motion,
         spec,
         viewer="file",
@@ -134,9 +134,9 @@ def test_replay_stage1_motion_uses_newton_viewer_api(tmp_path: Path):
     assert created[0][2].closed is True
 
 
-def test_replay_stage1_motion_logs_human_mesh_with_offset_and_time_sync():
+def test_replay_motion_logs_human_mesh_with_offset_and_time_sync():
     spec = RobotSpec.from_yaml(G1_29_ROBOT)
-    motion = _make_stage1_motion(spec, num_frames=3)
+    motion = _make_retargeted_motion(spec, num_frames=3)
     motion.fps = 10.0
     backend = FakeReplayBackend(spec)
     created = []
@@ -153,7 +153,7 @@ def test_replay_stage1_motion_logs_human_mesh_with_offset_and_time_sync():
         created.append(fake)
         return fake
 
-    result = replay_stage1_motion_with_newton(
+    result = replay_motion_with_newton(
         motion,
         spec,
         viewer="null",
@@ -178,13 +178,13 @@ def test_replay_stage1_motion_logs_human_mesh_with_offset_and_time_sync():
         assert len(mesh["kwargs"]["color"]) == 3
 
 
-def test_replay_stage1_motion_rejects_human_without_mesh():
+def test_replay_motion_rejects_human_without_mesh():
     spec = RobotSpec.from_yaml(G1_29_ROBOT)
-    motion = _make_stage1_motion(spec, num_frames=1)
+    motion = _make_retargeted_motion(spec, num_frames=1)
     human = make_canonical_motion(num_frames=1)
 
     with pytest.raises(ValueError, match="vertices_w and mesh_faces"):
-        replay_stage1_motion_with_newton(
+        replay_motion_with_newton(
             motion,
             spec,
             viewer="null",
@@ -194,7 +194,7 @@ def test_replay_stage1_motion_rejects_human_without_mesh():
         )
 
 
-def _make_stage1_motion(spec: RobotSpec, num_frames: int = 5) -> Stage1Motion:
+def _make_retargeted_motion(spec: RobotSpec, num_frames: int = 5) -> RetargetedMotion:
     joint_pos = np.zeros((num_frames, spec.num_dofs), dtype=np.float64)
     for idx in range(spec.num_dofs):
         joint_pos[:, idx] = 0.01 * idx
@@ -206,7 +206,7 @@ def _make_stage1_motion(spec: RobotSpec, num_frames: int = 5) -> Stage1Motion:
     body_pos = np.zeros((num_frames, len(spec.body_names), 3), dtype=np.float64)
     body_quat = np.zeros((num_frames, len(spec.body_names), 4), dtype=np.float64)
     body_quat[..., 3] = 1.0
-    return Stage1Motion(
+    return RetargetedMotion(
         fps=30.0,
         robot=spec.robot,
         joint_names=list(spec.actuated_joints),

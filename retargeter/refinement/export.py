@@ -6,15 +6,17 @@ from typing import Any
 
 import numpy as np
 
-from .sequence_ik_runner import RetargetedMotion
+from .quality import RefinementQualityReport
+from .refiner import RefinedMotion
 
 
-def export_retargeted_motion(
-    motion: RetargetedMotion,
+def export_refined_motion(
+    motion: RefinedMotion,
     output_path: Path | str,
     *,
     metadata_path: Path | str | None = None,
     quality_path: Path | str | None = None,
+    quality_report: RefinementQualityReport | None = None,
 ) -> dict[str, Any]:
     motion.validate()
     output = Path(output_path)
@@ -32,7 +34,8 @@ def export_retargeted_motion(
         body_names=np.asarray(motion.body_names),
         body_pos_w=motion.body_pos_w,
         body_quat_xyzw=motion.body_quat_xyzw,
-        success=motion.success,
+        root_delta=motion.root_delta,
+        joint_delta=motion.joint_delta,
     )
 
     metadata = {
@@ -42,14 +45,16 @@ def export_retargeted_motion(
         "joint_names": list(motion.joint_names),
         "body_names": list(motion.body_names),
         "metadata": _to_jsonable(motion.metadata),
+        "quality_metrics": _to_jsonable(motion.quality_metrics),
     }
     quality = {
         "frame_count": motion.num_frames(),
-        "success_count": int(np.count_nonzero(motion.success)),
-        "success_ratio": float(np.mean(motion.success)) if motion.num_frames() else 0.0,
-        "max_abs_joint_velocity": float(np.max(np.abs(motion.joint_vel))) if motion.joint_vel.size else 0.0,
-        "diagnostics": _to_jsonable(motion.diagnostics),
+        "quality_metrics": _to_jsonable(motion.quality_metrics),
+        "loss_curve": _to_jsonable(motion.loss_curve),
     }
+    if quality_report is not None:
+        quality["quality_report"] = quality_report.to_dict()
+        quality["valid"] = bool(quality_report.valid)
 
     if metadata_path is not None:
         _write_metadata(Path(metadata_path), metadata)
@@ -59,9 +64,9 @@ def export_retargeted_motion(
     return {"npz_path": str(output), "metadata": metadata, "quality": quality}
 
 
-def load_retargeted_motion_npz(path: Path | str) -> RetargetedMotion:
+def load_refined_motion_npz(path: Path | str) -> RefinedMotion:
     data = np.load(Path(path), allow_pickle=False)
-    motion = RetargetedMotion(
+    motion = RefinedMotion(
         fps=float(data["fps"]),
         robot=str(data["robot"]),
         joint_names=[str(name) for name in data["joint_names"].tolist()],
@@ -72,8 +77,8 @@ def load_retargeted_motion_npz(path: Path | str) -> RetargetedMotion:
         body_names=[str(name) for name in data["body_names"].tolist()],
         body_pos_w=np.asarray(data["body_pos_w"], dtype=np.float64),
         body_quat_xyzw=np.asarray(data["body_quat_xyzw"], dtype=np.float64),
-        success=np.asarray(data["success"], dtype=bool),
-        diagnostics=[],
+        root_delta=np.asarray(data["root_delta"], dtype=np.float64),
+        joint_delta=np.asarray(data["joint_delta"], dtype=np.float64),
         metadata={"loaded_from": str(path)},
     )
     motion.validate()
@@ -98,7 +103,7 @@ def _write_metadata(path: Path, payload: dict[str, Any]) -> None:
 
 def _to_jsonable(value):
     if isinstance(value, dict):
-        return {str(k): _to_jsonable(v) for k, v in value.items()}
+        return {str(key): _to_jsonable(item) for key, item in value.items()}
     if isinstance(value, list):
         return [_to_jsonable(item) for item in value]
     if isinstance(value, tuple):

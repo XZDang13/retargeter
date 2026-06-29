@@ -4,7 +4,13 @@ from pathlib import Path
 
 import numpy as np
 
+from retargeter.newton import load_retargeted_motion_npz
 from retargeter.preprocess import CanonicalHumanMotion, FootContactResult, PreprocessResult
+from retargeter.refinement import load_refined_motion_npz
+
+
+PRIMARY_REPLAY_MOTION_NAMES = ("final_motion.npz", "online_motion.npz", "retargeted_motion.npz")
+REPLAY_MOTION_PRIORITY = PRIMARY_REPLAY_MOTION_NAMES
 
 
 def export_canonical_human_motion_npz(
@@ -107,6 +113,43 @@ def load_preprocess_result_npz(path: Path | str, motion: CanonicalHumanMotion) -
         contact=contact,
         warnings=[],
         metadata={"loaded_from": str(path), "contact_available": True},
+    )
+
+
+def resolve_replay_motion_path(path: Path | str) -> Path:
+    input_path = Path(path)
+    if input_path.is_file():
+        return input_path
+    if not input_path.exists():
+        raise FileNotFoundError(f"Replay input does not exist: {input_path}")
+    if not input_path.is_dir():
+        raise ValueError(f"Replay input must be a motion npz or output directory, got {input_path}.")
+    for name in REPLAY_MOTION_PRIORITY:
+        candidate = input_path / name
+        if candidate.exists():
+            return candidate
+    raise FileNotFoundError(
+        f"Could not find replay motion in {input_path}. Expected one of {list(REPLAY_MOTION_PRIORITY)}."
+    )
+
+
+def default_human_path_for_replay_input(path: Path | str) -> Path | None:
+    input_path = Path(path)
+    directory = input_path if input_path.is_dir() else input_path.parent
+    candidate = directory / "human.npz"
+    return candidate if candidate.exists() else None
+
+
+def load_replay_motion_npz(path: Path | str):
+    motion_path = resolve_replay_motion_path(path)
+    data = np.load(motion_path, allow_pickle=False)
+    if "success" in data.files:
+        return load_retargeted_motion_npz(motion_path)
+    if "root_delta" in data.files or "joint_delta" in data.files:
+        return load_refined_motion_npz(motion_path)
+    raise ValueError(
+        f"Replay motion {motion_path} is neither retargeted nor refined motion format. "
+        "Expected 'success' or refinement delta fields."
     )
 
 

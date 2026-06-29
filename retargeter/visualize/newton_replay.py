@@ -7,7 +7,7 @@ from typing import Any, Callable, Protocol
 
 import numpy as np
 
-from retargeter.newton import IKState, NewtonBackend, RobotSpec, Stage1Motion
+from retargeter.newton import IKState, NewtonBackend, RobotSpec
 from retargeter.preprocess import CanonicalHumanMotion
 
 
@@ -25,6 +25,21 @@ class ReplayBackend(Protocol):
 
 
 ViewerFactory = Callable[[str, dict[str, Any]], Any]
+
+
+class ReplayMotion(Protocol):
+    fps: float
+    robot: str
+    joint_names: list[str]
+    root_pos_w: np.ndarray
+    root_quat_xyzw: np.ndarray
+    joint_pos: np.ndarray
+
+    def num_frames(self) -> int:
+        ...
+
+    def validate(self) -> None:
+        ...
 
 
 @dataclass(frozen=True)
@@ -45,9 +60,9 @@ class HumanMeshOverlay:
     color: tuple[float, float, float]
 
 
-def stage1_frame_to_ik_state(motion: Stage1Motion, robot_spec: RobotSpec, frame_idx: int) -> IKState:
-    """Convert one Stage1Motion frame into the IKState expected by NewtonBackend."""
-    validate_stage1_motion_for_robot(motion, robot_spec)
+def motion_frame_to_ik_state(motion: ReplayMotion, robot_spec: RobotSpec, frame_idx: int) -> IKState:
+    """Convert one replay motion frame into the IKState expected by NewtonBackend."""
+    validate_replay_motion_for_robot(motion, robot_spec)
     if frame_idx < 0 or frame_idx >= motion.num_frames():
         raise IndexError(f"frame_idx {frame_idx} is outside [0, {motion.num_frames()}).")
     return IKState(
@@ -57,16 +72,16 @@ def stage1_frame_to_ik_state(motion: Stage1Motion, robot_spec: RobotSpec, frame_
     )
 
 
-def validate_stage1_motion_for_robot(motion: Stage1Motion, robot_spec: RobotSpec) -> None:
+def validate_replay_motion_for_robot(motion: ReplayMotion, robot_spec: RobotSpec) -> None:
     motion.validate()
     if motion.robot != robot_spec.robot:
-        raise ValueError(f"Stage1Motion robot {motion.robot!r} does not match RobotSpec {robot_spec.robot!r}.")
+        raise ValueError(f"Replay motion robot {motion.robot!r} does not match RobotSpec {robot_spec.robot!r}.")
     if motion.joint_names != robot_spec.actuated_joints:
-        raise ValueError("Stage1Motion joint_names must exactly match RobotSpec actuated_joints.")
+        raise ValueError("Replay motion joint_names must exactly match RobotSpec actuated_joints.")
 
 
-def replay_stage1_motion_with_newton(
-    motion: Stage1Motion,
+def replay_motion_with_newton(
+    motion: ReplayMotion,
     robot_spec: RobotSpec,
     *,
     viewer: str = "file",
@@ -86,7 +101,7 @@ def replay_stage1_motion_with_newton(
     human_offset: np.ndarray | tuple[float, float, float] | list[float] | None = None,
     human_mesh_color: tuple[float, float, float] = DEFAULT_HUMAN_MESH_COLOR,
 ) -> NewtonReplayResult:
-    """Send Stage1Motion frames through Newton's real viewer API.
+    """Send replay motion frames through Newton's real viewer API.
 
     Use ``viewer='file'`` or ``viewer='usd'`` for deterministic artifacts, and
     ``viewer='viser'`` or ``viewer='gl'`` for interactive inspection.
@@ -94,7 +109,7 @@ def replay_stage1_motion_with_newton(
     viewer = str(viewer).lower()
     if viewer not in NEWTON_VIEWER_KINDS:
         raise ValueError(f"Unsupported Newton viewer {viewer!r}; expected one of {sorted(NEWTON_VIEWER_KINDS)}.")
-    validate_stage1_motion_for_robot(motion, robot_spec)
+    validate_replay_motion_for_robot(motion, robot_spec)
     frame_indices = _frame_indices(motion, start_frame=start_frame, end_frame=end_frame)
     effective_fps = float(fps or motion.fps)
     if effective_fps <= 0.0 or not np.isfinite(effective_fps):
@@ -102,7 +117,7 @@ def replay_stage1_motion_with_newton(
 
     output = Path(output_path) if output_path is not None else None
     if viewer in {"file", "usd"} and output is None:
-        output = Path("stage1_newton_replay.json" if viewer == "file" else "stage1_newton_replay.usd")
+        output = Path("newton_replay.json" if viewer == "file" else "newton_replay.usd")
     if output is not None:
         output.parent.mkdir(parents=True, exist_ok=True)
 
@@ -134,7 +149,7 @@ def replay_stage1_motion_with_newton(
                 continue
 
             frame_idx = frame_indices[cursor]
-            ik_state = stage1_frame_to_ik_state(motion, robot_spec, frame_idx)
+            ik_state = motion_frame_to_ik_state(motion, robot_spec, frame_idx)
             native_state = replay_backend.make_newton_state(ik_state)
             newton_viewer.begin_frame(frames_written / effective_fps)
             newton_viewer.log_state(native_state)
@@ -247,16 +262,16 @@ def _log_replay_scalars(newton_viewer, frame_idx: int, state: IKState) -> None:
     if log_scalar is None:
         return
     try:
-        log_scalar("stage1/frame", int(frame_idx))
-        log_scalar("stage1/root_x", float(state.root_pos_w[0]))
-        log_scalar("stage1/root_y", float(state.root_pos_w[1]))
-        log_scalar("stage1/root_z", float(state.root_pos_w[2]))
+        log_scalar("replay/frame", int(frame_idx))
+        log_scalar("replay/root_x", float(state.root_pos_w[0]))
+        log_scalar("replay/root_y", float(state.root_pos_w[1]))
+        log_scalar("replay/root_z", float(state.root_pos_w[2]))
     except Exception:
         return
 
 
-def record_stage1_newton_replay(
-    motion: Stage1Motion,
+def record_newton_replay(
+    motion: ReplayMotion,
     robot_spec: RobotSpec,
     output_path: Path | str,
     *,
@@ -267,7 +282,7 @@ def record_stage1_newton_replay(
     viewer_factory: ViewerFactory | None = None,
 ) -> NewtonReplayResult:
     """Write a Newton ViewerFile replay that can be loaded by Newton tools."""
-    return replay_stage1_motion_with_newton(
+    return replay_motion_with_newton(
         motion,
         robot_spec,
         viewer="file",
@@ -282,7 +297,7 @@ def record_stage1_newton_replay(
     )
 
 
-def _frame_indices(motion: Stage1Motion, *, start_frame: int, end_frame: int | None) -> list[int]:
+def _frame_indices(motion: ReplayMotion, *, start_frame: int, end_frame: int | None) -> list[int]:
     total = motion.num_frames()
     end = total if end_frame is None else int(end_frame)
     start = int(start_frame)
@@ -318,7 +333,7 @@ def _make_viewer(
     try:
         from newton import viewer as newton_viewer
     except ImportError as exc:
-        raise RuntimeError("Newton is required for Stage 1 replay visualization.") from exc
+        raise RuntimeError("Newton is required for replay visualization.") from exc
 
     if viewer == "file":
         return newton_viewer.ViewerFile(str(output_path))

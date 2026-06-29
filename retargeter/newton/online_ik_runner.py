@@ -3,13 +3,13 @@ from __future__ import annotations
 from retargeter.preprocess import CanonicalHumanMotion, FootContactResult
 from retargeter.scale import IKTargetSet
 
-from .stage1_solver import Stage1FrameResult, Stage1NewtonSolver
+from .ik_retarget_solver import IKRetargetFrameResult, NewtonIKRetargetSolver
 
 
-class OnlineStage1Runner:
-    def __init__(self, solver: Stage1NewtonSolver):
+class OnlineIKRetargetRunner:
+    def __init__(self, solver: NewtonIKRetargetSolver):
         self.solver = solver
-        self.previous_result: Stage1FrameResult | None = None
+        self.previous_result: IKRetargetFrameResult | None = None
         self.frame_count = 0
 
     def reset(self) -> None:
@@ -22,7 +22,7 @@ class OnlineStage1Runner:
         frame_idx: int,
         *,
         contact_result: FootContactResult | None = None,
-    ) -> Stage1FrameResult:
+    ) -> IKRetargetFrameResult:
         result = self.solver.solve_frame(
             motion,
             frame_idx,
@@ -35,15 +35,15 @@ class OnlineStage1Runner:
 
     def step_targets(
         self,
-        stage1a_targets: IKTargetSet,
-        stage1b_targets: IKTargetSet,
+        coarse_targets: IKTargetSet,
+        tracking_targets: IKTargetSet,
         *,
         fps: float,
         frame_idx: int | None = None,
-    ) -> Stage1FrameResult:
+    ) -> IKRetargetFrameResult:
         result = self.solver.solve_target_sets(
-            stage1a_targets,
-            stage1b_targets,
+            coarse_targets,
+            tracking_targets,
             frame_idx=self.frame_count if frame_idx is None else int(frame_idx),
             fps=float(fps),
             previous_result=self.previous_result,

@@ -58,7 +58,7 @@ def clamp_joint_velocity(
     return clamped, changed, max_velocity_before
 
 
-def apply_stage1_postprocess(
+def apply_ik_postprocess(
     joint_pos: np.ndarray,
     robot_spec: RobotSpec,
     *,

@@ -4,12 +4,12 @@ import numpy as np
 import pytest
 
 from conftest import make_canonical_motion
-from retargeter.preprocess import REQUIRED_STAGE1_BODY_NAMES
+from retargeter.preprocess import REQUIRED_CANONICAL_BODY_NAMES
 
 
 def test_canonical_motion_accessors_and_setters():
     motion = make_canonical_motion(num_frames=5)
-    motion.validate(required_bodies=REQUIRED_STAGE1_BODY_NAMES)
+    motion.validate(required_bodies=REQUIRED_CANONICAL_BODY_NAMES)
 
     left_foot = motion.get_body_pos("left_foot")
     assert left_foot.shape == (5, 3)
@@ -42,5 +42,5 @@ def test_canonical_motion_required_body_validation():
     motion.body_quat_xyzw = motion.body_quat_xyzw[:, :-1, :]
 
     with pytest.raises(ValueError, match="Missing required bodies"):
-        motion.validate(required_bodies=REQUIRED_STAGE1_BODY_NAMES)
+        motion.validate(required_bodies=REQUIRED_CANONICAL_BODY_NAMES)
 

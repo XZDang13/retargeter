@@ -6,7 +6,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from retargeter.preprocess import CanonicalHumanMotion, REQUIRED_STAGE1_BODY_NAMES
+from retargeter.preprocess import CanonicalHumanMotion, REQUIRED_CANONICAL_BODY_NAMES
 
 
 def make_canonical_motion(
@@ -15,7 +15,7 @@ def make_canonical_motion(
     foot_z: float = 0.03,
     include_vertices: bool = False,
 ) -> CanonicalHumanMotion:
-    body_names = list(REQUIRED_STAGE1_BODY_NAMES)
+    body_names = list(REQUIRED_CANONICAL_BODY_NAMES)
     body_pos = np.zeros((num_frames, len(body_names), 3), dtype=np.float64)
     body_quat = np.zeros((num_frames, len(body_names), 4), dtype=np.float64)
     body_quat[..., 3] = 1.0

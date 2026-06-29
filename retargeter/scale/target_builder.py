@@ -12,7 +12,11 @@ from .human_to_robot_scaler import HumanToRobotScaler
 from .ik_targets import BodyIKTarget, IKTargetSet
 
 
-class Stage1TargetBuilder:
+IK_PASS_NAMES = ("coarse_alignment", "full_body_tracking")
+IKPassName = Literal["coarse_alignment", "full_body_tracking"]
+
+
+class IKTargetBuilder:
     def __init__(
         self,
         scaler_config_path: Path | str,
@@ -27,20 +31,19 @@ class Stage1TargetBuilder:
         self,
         motion: CanonicalHumanMotion,
         frame_idx: int,
-        stage_name: Literal["stage1a", "stage1b"],
+        pass_name: IKPassName,
         contact_result: FootContactResult | None = None,
     ) -> IKTargetSet:
-        if stage_name not in {"stage1a", "stage1b"}:
-            raise ValueError(f"stage_name must be 'stage1a' or 'stage1b', got {stage_name!r}.")
+        pass_name = _canonical_pass_name(pass_name)
         if frame_idx < 0 or frame_idx >= motion.num_frames():
             raise IndexError(f"frame_idx {frame_idx} is outside motion length {motion.num_frames()}.")
 
         scaled_motion = self.scaler.scale_motion(motion)
-        stage_weights = self.target_config[stage_name]
+        pass_weights = self.target_config[pass_name]
         targets: list[BodyIKTarget] = []
         modulation = self.target_config.get("contact_weight_modulation", {})
 
-        for semantic_name, weights in stage_weights.items():
+        for semantic_name, weights in pass_weights.items():
             if semantic_name not in self.scaler.body_map:
                 raise ValueError(f"No body_map entry for target semantic name {semantic_name!r}.")
             map_entry = self.scaler.body_map[semantic_name]
@@ -105,30 +108,28 @@ class Stage1TargetBuilder:
             targets.append(target)
 
         target_set = IKTargetSet(
-            stage_name=stage_name,
+            pass_name=pass_name,
             targets=targets,
             metadata={
                 "frame_idx": frame_idx,
                 "robot": self.scaler.robot,
                 "scaler_config_path": str(self.scaler.scaler_config_path),
                 "target_config_path": str(self.target_config_path),
-                "required_robot_body_names": self.required_robot_body_names(stage_name),
+                "required_robot_body_names": self.required_robot_body_names(pass_name),
             },
         )
         target_set.validate()
         return target_set
 
-    def required_robot_body_names(self, stage_name: Literal["stage1a", "stage1b"] | None = None) -> list[str]:
-        if stage_name is None:
-            stage_names = ("stage1a", "stage1b")
+    def required_robot_body_names(self, pass_name: IKPassName | None = None) -> list[str]:
+        if pass_name is None:
+            pass_names = IK_PASS_NAMES
         else:
-            if stage_name not in {"stage1a", "stage1b"}:
-                raise ValueError(f"stage_name must be 'stage1a' or 'stage1b', got {stage_name!r}.")
-            stage_names = (stage_name,)
+            pass_names = (_canonical_pass_name(pass_name),)
 
         names: list[str] = []
-        for active_stage in stage_names:
-            for semantic_name in self.target_config[active_stage]:
+        for active_pass in pass_names:
+            for semantic_name in self.target_config[active_pass]:
                 map_entry = self.scaler.body_map.get(semantic_name)
                 if map_entry is None:
                     continue
@@ -452,13 +453,19 @@ def _load_yaml(path: Path) -> dict[str, Any]:
 
 
 def _validate_target_config(config: dict[str, Any], path: Path) -> None:
-    missing = [stage for stage in ("stage1a", "stage1b") if stage not in config]
+    missing = [pass_name for pass_name in IK_PASS_NAMES if pass_name not in config]
     if missing:
-        raise ValueError(f"Target config {path} is missing required stages: {missing}.")
-    for stage_name in ("stage1a", "stage1b"):
-        stage = config[stage_name]
+        raise ValueError(f"Target config {path} is missing required IK passes: {missing}.")
+    for pass_name in IK_PASS_NAMES:
+        stage = config[pass_name]
         if not isinstance(stage, dict) or not stage:
-            raise ValueError(f"{stage_name} in {path} must be a non-empty mapping.")
+            raise ValueError(f"{pass_name} in {path} must be a non-empty mapping.")
         for semantic_name, weights in stage.items():
             if "pos_weight" not in weights or "rot_weight" not in weights:
-                raise ValueError(f"{stage_name}.{semantic_name} must define pos_weight and rot_weight.")
+                raise ValueError(f"{pass_name}.{semantic_name} must define pos_weight and rot_weight.")
+
+
+def _canonical_pass_name(pass_name: str) -> str:
+    if pass_name not in IK_PASS_NAMES:
+        raise ValueError(f"IK pass name must be one of {sorted(IK_PASS_NAMES)}, got {pass_name!r}.")
+    return pass_name

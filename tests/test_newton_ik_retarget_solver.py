@@ -9,15 +9,15 @@ from retargeter.newton import (
     BackendSolveResult,
     IKState,
     NewtonSolveSettings,
-    OnlineStage1Runner,
+    OnlineIKRetargetRunner,
     RobotBodyState,
     RobotSpec,
-    SequenceStage1Runner,
-    Stage1NewtonSolver,
+    SequenceIKRetargetRunner,
+    NewtonIKRetargetSolver,
 )
 
 
-G1_29_NEWTON = Path("retargeter/newton/configs/g1_29_newton_stage1.yaml")
+G1_29_NEWTON = Path("retargeter/newton/configs/g1_29_newton_ik.yaml")
 G1_29_ROBOT = Path("retargeter/newton/configs/g1_29_robot.yaml")
 
 
@@ -60,10 +60,10 @@ class MockBackend:
         return RobotBodyState(list(self.robot_spec.body_names), body_pos, body_quat)
 
 
-def test_stage1_solver_single_frame_uses_stage1a_then_stage1b():
+def test_ik_retarget_solver_single_frame_uses_coarse_alignment_then_full_body_tracking():
     spec = RobotSpec.from_yaml(G1_29_ROBOT)
     backend = MockBackend(spec)
-    solver = Stage1NewtonSolver(G1_29_NEWTON, backend=backend)
+    solver = NewtonIKRetargetSolver(G1_29_NEWTON, backend=backend)
     motion = make_canonical_motion(num_frames=4)
 
     result = solver.solve_frame(motion, frame_idx=1)
@@ -75,14 +75,14 @@ def test_stage1_solver_single_frame_uses_stage1a_then_stage1b():
     assert backend.calls[0]["settings"].iterations == 24
     assert backend.calls[1]["settings"].iterations == 24
     assert len(backend.calls[1]["objectives"]) > len(backend.calls[0]["objectives"])
-    assert result.diagnostics["stage1a"]["success"]
-    assert result.diagnostics["stage1b"]["success"]
+    assert result.diagnostics["coarse_alignment"]["success"]
+    assert result.diagnostics["full_body_tracking"]["success"]
 
 
-def test_stage1_solver_warm_starts_from_previous_result():
+def test_ik_retarget_solver_warm_starts_from_previous_result():
     spec = RobotSpec.from_yaml(G1_29_ROBOT)
     backend = MockBackend(spec)
-    solver = Stage1NewtonSolver(G1_29_NEWTON, backend=backend)
+    solver = NewtonIKRetargetSolver(G1_29_NEWTON, backend=backend)
     motion = make_canonical_motion(num_frames=3)
 
     first = solver.solve_frame(motion, frame_idx=0)
@@ -93,10 +93,10 @@ def test_stage1_solver_warm_starts_from_previous_result():
     assert np.any(second.joint_vel != 0.0)
 
 
-def test_stage1_solver_falls_back_without_dropping_frame():
+def test_ik_retarget_solver_falls_back_without_dropping_frame():
     spec = RobotSpec.from_yaml(G1_29_ROBOT)
     backend = MockBackend(spec, fail_call_indices={1})
-    solver = Stage1NewtonSolver(G1_29_NEWTON, backend=backend)
+    solver = NewtonIKRetargetSolver(G1_29_NEWTON, backend=backend)
     motion = make_canonical_motion(num_frames=2)
 
     result = solver.solve_frame(motion, frame_idx=0)
@@ -110,24 +110,24 @@ def test_stage1_solver_falls_back_without_dropping_frame():
 def test_sequence_runner_keeps_100_frames_and_calls_two_stages_per_frame():
     spec = RobotSpec.from_yaml(G1_29_ROBOT)
     backend = MockBackend(spec, joint_delta=0.001)
-    solver = Stage1NewtonSolver(G1_29_NEWTON, backend=backend)
-    runner = SequenceStage1Runner(solver)
+    solver = NewtonIKRetargetSolver(G1_29_NEWTON, backend=backend)
+    runner = SequenceIKRetargetRunner(solver)
     motion = make_canonical_motion(num_frames=100)
 
-    stage1_motion = runner.run(motion)
+    retargeted_motion = runner.run(motion)
 
-    assert stage1_motion.num_frames() == 100
-    assert stage1_motion.joint_pos.shape == (100, 29)
-    assert stage1_motion.body_pos_w.shape == (100, len(spec.body_names), 3)
-    assert np.all(stage1_motion.success)
+    assert retargeted_motion.num_frames() == 100
+    assert retargeted_motion.joint_pos.shape == (100, 29)
+    assert retargeted_motion.body_pos_w.shape == (100, len(spec.body_names), 3)
+    assert np.all(retargeted_motion.success)
     assert len(backend.calls) == 200
 
 
 def test_online_runner_steps_and_resets_state():
     spec = RobotSpec.from_yaml(G1_29_ROBOT)
     backend = MockBackend(spec)
-    solver = Stage1NewtonSolver(G1_29_NEWTON, backend=backend)
-    runner = OnlineStage1Runner(solver)
+    solver = NewtonIKRetargetSolver(G1_29_NEWTON, backend=backend)
+    runner = OnlineIKRetargetRunner(solver)
     motion = make_canonical_motion(num_frames=3)
 
     first = runner.step(motion, 0)

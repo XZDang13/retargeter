@@ -1,11 +1,11 @@
-robot_config: retargeter/newton/configs/g1_23_robot.yaml
-scaler_config: retargeter/scale/configs/g1_23_scaler.yaml
-target_config: retargeter/scale/configs/g1_23_stage1_targets.yaml
+robot_config: retargeter/newton/configs/g1_29_robot.yaml
+scaler_config: retargeter/scale/configs/g1_29_scaler.yaml
+target_config: retargeter/scale/configs/g1_29_ik_targets.yaml
 
 solver:
   iterations:
-    stage1a: 24
-    stage1b: 24
+    coarse_alignment: 24
+    full_body_tracking: 24
   step_size: 1.0
   optimizer: lm
   jacobian_mode: analytic

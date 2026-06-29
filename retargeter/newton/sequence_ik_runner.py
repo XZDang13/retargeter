@@ -6,11 +6,11 @@ import numpy as np
 
 from retargeter.preprocess import CanonicalHumanMotion, FootContactResult
 
-from .stage1_solver import Stage1FrameResult, Stage1NewtonSolver
+from .ik_retarget_solver import IKRetargetFrameResult, NewtonIKRetargetSolver
 
 
 @dataclass
-class Stage1Motion:
+class RetargetedMotion:
     fps: float
     robot: str
     joint_names: list[str]
@@ -51,8 +51,8 @@ class Stage1Motion:
             raise ValueError(f"fps must be positive and finite, got {self.fps!r}.")
 
 
-class SequenceStage1Runner:
-    def __init__(self, solver: Stage1NewtonSolver):
+class SequenceIKRetargetRunner:
+    def __init__(self, solver: NewtonIKRetargetSolver):
         self.solver = solver
 
     def run(
@@ -60,10 +60,10 @@ class SequenceStage1Runner:
         motion: CanonicalHumanMotion,
         *,
         contact_result: FootContactResult | None = None,
-    ) -> Stage1Motion:
+    ) -> RetargetedMotion:
         motion.validate()
-        frame_results: list[Stage1FrameResult] = []
-        previous: Stage1FrameResult | None = None
+        frame_results: list[IKRetargetFrameResult] = []
+        previous: IKRetargetFrameResult | None = None
         for frame_idx in range(motion.num_frames()):
             result = self.solver.solve_frame(
                 motion,
@@ -73,15 +73,15 @@ class SequenceStage1Runner:
             )
             frame_results.append(result)
             previous = result
-        return stage1_motion_from_frames(frame_results, fps=float(motion.fps), metadata={"source_frames": motion.num_frames()})
+        return retargeted_motion_from_frames(frame_results, fps=float(motion.fps), metadata={"source_frames": motion.num_frames()})
 
 
-def stage1_motion_from_frames(
-    frame_results: list[Stage1FrameResult],
+def retargeted_motion_from_frames(
+    frame_results: list[IKRetargetFrameResult],
     *,
     fps: float,
     metadata: dict | None = None,
-) -> Stage1Motion:
+) -> RetargetedMotion:
     if not frame_results:
         raise ValueError("frame_results must be non-empty.")
 
@@ -96,7 +96,7 @@ def stage1_motion_from_frames(
         if result.body_state.body_names != body_names:
             raise ValueError("All frame results must use the same body order.")
 
-    stage1_motion = Stage1Motion(
+    retargeted_motion = RetargetedMotion(
         fps=float(fps),
         robot=robot,
         joint_names=joint_names,
@@ -111,5 +111,5 @@ def stage1_motion_from_frames(
         diagnostics=[dict(result.diagnostics) for result in frame_results],
         metadata=dict(metadata or {}),
     )
-    stage1_motion.validate()
-    return stage1_motion
+    retargeted_motion.validate()
+    return retargeted_motion

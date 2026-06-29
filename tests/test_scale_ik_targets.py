@@ -28,7 +28,7 @@ def test_ik_target_set_validation_and_active_filters():
             rot_weight=1.0,
         ),
     ]
-    target_set = IKTargetSet(stage_name="stage1a", targets=targets)
+    target_set = IKTargetSet(pass_name="coarse_alignment", targets=targets)
 
     target_set.validate()
 
@@ -48,7 +48,7 @@ def test_ik_target_set_rejects_duplicate_semantic_name():
         pos_weight=1.0,
         rot_weight=1.0,
     )
-    target_set = IKTargetSet(stage_name="stage1a", targets=[target, target])
+    target_set = IKTargetSet(pass_name="coarse_alignment", targets=[target, target])
 
     with pytest.raises(ValueError, match="Duplicate"):
         target_set.validate()

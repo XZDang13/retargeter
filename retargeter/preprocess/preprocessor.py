@@ -3,7 +3,7 @@ from __future__ import annotations
 import warnings
 from dataclasses import dataclass, field
 
-from .canonical import CanonicalHumanMotion, REQUIRED_STAGE1_BODY_NAMES
+from .canonical import CanonicalHumanMotion, REQUIRED_CANONICAL_BODY_NAMES
 from .config import PreprocessConfig
 from .contact import FootContactEstimator, FootContactResult
 from .ground import GroundEstimate, GroundPlaneEstimator
@@ -24,7 +24,7 @@ class MotionPreprocessor:
         self.config = config
 
     def process(self, motion: CanonicalHumanMotion) -> PreprocessResult:
-        motion.validate(required_bodies=REQUIRED_STAGE1_BODY_NAMES)
+        motion.validate(required_bodies=REQUIRED_CANONICAL_BODY_NAMES)
         collected_warnings: list[str] = []
 
         processed = motion.copy()

@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 
-REQUIRED_STAGE1_BODY_NAMES = [
+REQUIRED_CANONICAL_BODY_NAMES = [
     "pelvis",
     "chest",
     "head",

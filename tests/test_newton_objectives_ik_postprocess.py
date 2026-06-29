@@ -7,19 +7,19 @@ import pytest
 
 from conftest import make_canonical_motion
 from retargeter.newton import RobotSpec, build_regularization_objectives, build_target_objectives
-from retargeter.newton.postprocess import apply_stage1_postprocess, clamp_joint_limits, clamp_joint_velocity
-from retargeter.scale import BodyIKTarget, IKTargetSet, Stage1TargetBuilder
+from retargeter.newton.postprocess import apply_ik_postprocess, clamp_joint_limits, clamp_joint_velocity
+from retargeter.scale import BodyIKTarget, IKTargetSet, IKTargetBuilder
 
 
 G1_29_ROBOT = Path("retargeter/newton/configs/g1_29_robot.yaml")
 G1_29_SCALER = Path("retargeter/scale/configs/g1_29_scaler.yaml")
-G1_29_TARGETS = Path("retargeter/scale/configs/g1_29_stage1_targets.yaml")
+G1_29_TARGETS = Path("retargeter/scale/configs/g1_29_ik_targets.yaml")
 
 
 def test_build_target_objectives_preserves_target_weights_and_confidence():
     spec = RobotSpec.from_yaml(G1_29_ROBOT)
     motion = make_canonical_motion(num_frames=3)
-    target_set = Stage1TargetBuilder(G1_29_SCALER, G1_29_TARGETS).build(motion, 1, "stage1a")
+    target_set = IKTargetBuilder(G1_29_SCALER, G1_29_TARGETS).build(motion, 1, "coarse_alignment")
 
     descriptors = build_target_objectives(target_set, spec)
 
@@ -34,7 +34,7 @@ def test_build_target_objectives_preserves_target_weights_and_confidence():
 def test_local_foot_target_objective_preserves_body_local_point():
     spec = RobotSpec.from_yaml(G1_29_ROBOT)
     target_set = IKTargetSet(
-        stage_name="stage1b",
+        pass_name="full_body_tracking",
         targets=[
             BodyIKTarget(
                 semantic_name="left_toe",
@@ -59,7 +59,7 @@ def test_local_foot_target_objective_preserves_body_local_point():
 def test_target_objectives_raise_for_missing_robot_body():
     spec = RobotSpec.from_yaml(G1_29_ROBOT)
     target_set = IKTargetSet(
-        stage_name="stage1a",
+        pass_name="coarse_alignment",
         targets=[
             BodyIKTarget(
                 semantic_name="bad",
@@ -113,11 +113,11 @@ def test_joint_limit_and_velocity_clamps_are_deterministic():
     assert np.all(vel_clamped <= spec.velocity_limits_rad_s * 0.05 + 1e-12)
 
 
-def test_apply_stage1_postprocess_preserves_shape():
+def test_apply_ik_postprocess_preserves_shape():
     spec = RobotSpec.from_yaml(G1_29_ROBOT)
     q = spec.joint_upper_rad + 0.25
 
-    out, report = apply_stage1_postprocess(
+    out, report = apply_ik_postprocess(
         q,
         spec,
         previous_joint_pos=np.zeros(spec.num_dofs),

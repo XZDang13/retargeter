@@ -7,22 +7,22 @@ import numpy as np
 
 from conftest import make_canonical_motion
 from retargeter.preprocess import FootContactResult
-from retargeter.scale import Stage1TargetBuilder
+from retargeter.scale import IKTargetBuilder
 
 
 G1_29_SCALER = Path("retargeter/scale/configs/g1_29_scaler.yaml")
 G1_23_SCALER = Path("retargeter/scale/configs/g1_23_scaler.yaml")
-G1_29_TARGETS = Path("retargeter/scale/configs/g1_29_stage1_targets.yaml")
-G1_23_TARGETS = Path("retargeter/scale/configs/g1_23_stage1_targets.yaml")
+G1_29_TARGETS = Path("retargeter/scale/configs/g1_29_ik_targets.yaml")
+G1_23_TARGETS = Path("retargeter/scale/configs/g1_23_ik_targets.yaml")
 
 
-def test_g1_29_stage1a_builder_returns_expected_targets():
+def test_g1_29_coarse_alignment_builder_returns_expected_targets():
     motion = make_canonical_motion(num_frames=5)
-    builder = Stage1TargetBuilder(G1_29_SCALER, G1_29_TARGETS)
+    builder = IKTargetBuilder(G1_29_SCALER, G1_29_TARGETS)
 
-    target_set = builder.build(motion, frame_idx=2, stage_name="stage1a")
+    target_set = builder.build(motion, frame_idx=2, pass_name="coarse_alignment")
 
-    assert target_set.stage_name == "stage1a"
+    assert target_set.pass_name == "coarse_alignment"
     assert [target.semantic_name for target in target_set.targets] == [
         "pelvis",
         "left_hip",
@@ -54,8 +54,8 @@ def test_g1_29_stage1a_builder_returns_expected_targets():
 
 def test_gmr_style_hands_and_phuma_soma_style_shoulders_for_both_g1_variants():
     motion = make_canonical_motion(num_frames=3)
-    target_29 = Stage1TargetBuilder(G1_29_SCALER, G1_29_TARGETS).build(motion, 0, "stage1a")
-    target_23 = Stage1TargetBuilder(G1_23_SCALER, G1_23_TARGETS).build(motion, 0, "stage1a")
+    target_29 = IKTargetBuilder(G1_29_SCALER, G1_29_TARGETS).build(motion, 0, "coarse_alignment")
+    target_23 = IKTargetBuilder(G1_23_SCALER, G1_23_TARGETS).build(motion, 0, "coarse_alignment")
 
     assert target_29.get_target("left_hand").rot_weight == 10.0
     assert target_29.get_target("left_hand").target_pos_w is None
@@ -66,9 +66,9 @@ def test_gmr_style_hands_and_phuma_soma_style_shoulders_for_both_g1_variants():
     assert target_23.get_target("right_shoulder").robot_body_name == "right_shoulder_roll_link"
 
 
-def test_stage1b_includes_gmr_style_limb_targets():
+def test_full_body_tracking_includes_gmr_style_limb_targets():
     motion = make_canonical_motion(num_frames=3)
-    target_set = Stage1TargetBuilder(G1_29_SCALER, G1_29_TARGETS).build(motion, 0, "stage1b")
+    target_set = IKTargetBuilder(G1_29_SCALER, G1_29_TARGETS).build(motion, 0, "full_body_tracking")
 
     assert target_set.get_target("left_hip").robot_body_name == "left_hip_roll_link"
     assert target_set.get_target("right_hip").robot_body_name == "right_hip_roll_link"
@@ -80,9 +80,9 @@ def test_stage1b_includes_gmr_style_limb_targets():
     assert target_set.get_target("right_shoulder").robot_body_name == "right_shoulder_roll_link"
 
 
-def test_stage1b_uses_skeleton_foot_targets_and_position_only_contact_keypoints():
+def test_full_body_tracking_uses_skeleton_foot_targets_and_position_only_contact_keypoints():
     motion = make_canonical_motion(num_frames=3)
-    target_set = Stage1TargetBuilder(G1_29_SCALER, G1_29_TARGETS).build(motion, 0, "stage1b")
+    target_set = IKTargetBuilder(G1_29_SCALER, G1_29_TARGETS).build(motion, 0, "full_body_tracking")
 
     left_foot = target_set.get_target("left_foot")
     assert left_foot.human_body_name == "left_foot"
@@ -115,10 +115,10 @@ def test_default_scaler_configs_do_not_use_mesh_sole_sources():
 
 
 def test_stage_required_robot_bodies_exclude_non_target_head_link():
-    builder = Stage1TargetBuilder(G1_29_SCALER, G1_29_TARGETS)
+    builder = IKTargetBuilder(G1_29_SCALER, G1_29_TARGETS)
 
-    assert "head_link" not in builder.required_robot_body_names("stage1a")
-    assert "head_link" not in builder.required_robot_body_names("stage1b")
+    assert "head_link" not in builder.required_robot_body_names("coarse_alignment")
+    assert "head_link" not in builder.required_robot_body_names("full_body_tracking")
 
 
 def test_contact_scores_increase_stance_foot_weights():
@@ -133,9 +133,9 @@ def test_contact_scores_increase_stance_foot_weights():
         foot_speed={},
         ground_height=0.0,
     )
-    builder = Stage1TargetBuilder(G1_29_SCALER, G1_29_TARGETS)
+    builder = IKTargetBuilder(G1_29_SCALER, G1_29_TARGETS)
 
-    target_set = builder.build(motion, frame_idx=1, stage_name="stage1a", contact_result=contact)
+    target_set = builder.build(motion, frame_idx=1, pass_name="coarse_alignment", contact_result=contact)
 
     assert target_set.get_target("left_foot").pos_weight == 95.0
     assert target_set.get_target("left_foot").rot_weight == 2.0
@@ -159,9 +159,9 @@ def test_contact_scores_activate_position_only_toe_heel_keypoints():
         foot_speed={},
         ground_height=0.0,
     )
-    builder = Stage1TargetBuilder(G1_29_SCALER, G1_29_TARGETS)
+    builder = IKTargetBuilder(G1_29_SCALER, G1_29_TARGETS)
 
-    target_set = builder.build(motion, frame_idx=1, stage_name="stage1b", contact_result=contact)
+    target_set = builder.build(motion, frame_idx=1, pass_name="full_body_tracking", contact_result=contact)
 
     assert target_set.get_target("left_toe").pos_weight == 40.0
     assert target_set.get_target("left_toe").rot_weight == 0.0
@@ -183,7 +183,7 @@ def test_config_robot_body_names_match_local_usd_assets():
     }
 
     for scaler_path, usd_names in expected.items():
-        builder = Stage1TargetBuilder(
+        builder = IKTargetBuilder(
             scaler_path,
             G1_29_TARGETS if scaler_path == G1_29_SCALER else G1_23_TARGETS,
         )

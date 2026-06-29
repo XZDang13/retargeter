@@ -1,4 +1,4 @@
-stage1a:
+coarse_alignment:
   pelvis:
     pos_weight: 100.0
     rot_weight: 10.0
@@ -60,7 +60,7 @@ stage1a:
     pos_weight: 0.0
     rot_weight: 10.0
 
-stage1b:
+full_body_tracking:
   pelvis:
     pos_weight: 100.0
     rot_weight: 5.0

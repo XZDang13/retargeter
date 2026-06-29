@@ -9,7 +9,7 @@ import matplotlib
 matplotlib.use("Agg", force=True)
 import matplotlib.pyplot as plt
 
-from retargeter.newton import RobotSpec, Stage1Motion
+from retargeter.newton import RetargetedMotion, RobotSpec
 from retargeter.preprocess import PreprocessResult
 
 
@@ -43,17 +43,17 @@ def plot_foot_height_and_speed(preprocess_result: PreprocessResult, output_path:
     return _save(fig, output_path)
 
 
-def plot_ik_errors(stage1_motion: Stage1Motion, output_path: Path | str) -> Path:
-    stage1_motion.validate()
-    stage1a_cost = _diagnostic_series(stage1_motion, ("stage1a", "cost"))
-    stage1b_cost = _diagnostic_series(stage1_motion, ("stage1b", "cost"))
+def plot_ik_errors(retargeted_motion: RetargetedMotion, output_path: Path | str) -> Path:
+    retargeted_motion.validate()
+    coarse_cost = _diagnostic_series(retargeted_motion, ("coarse_alignment", "cost"))
+    tracking_cost = _diagnostic_series(retargeted_motion, ("full_body_tracking", "cost"))
     fig, ax = plt.subplots(figsize=(10, 4), dpi=120)
-    if stage1a_cost is not None:
-        ax.plot(stage1a_cost, label="stage1a cost")
-    if stage1b_cost is not None:
-        ax.plot(stage1b_cost, label="stage1b cost")
-    if stage1a_cost is None and stage1b_cost is None:
-        ax.plot(np.zeros(stage1_motion.num_frames()), label="no cost diagnostics")
+    if coarse_cost is not None:
+        ax.plot(coarse_cost, label="coarse alignment cost")
+    if tracking_cost is not None:
+        ax.plot(tracking_cost, label="full body tracking cost")
+    if coarse_cost is None and tracking_cost is None:
+        ax.plot(np.zeros(retargeted_motion.num_frames()), label="no cost diagnostics")
     ax.set_title("IK diagnostics")
     ax.set_xlabel("frame")
     ax.set_ylabel("cost")
@@ -61,62 +61,62 @@ def plot_ik_errors(stage1_motion: Stage1Motion, output_path: Path | str) -> Path
     return _save(fig, output_path)
 
 
-def plot_joint_positions(stage1_motion: Stage1Motion, output_path: Path | str) -> Path:
-    stage1_motion.validate()
+def plot_joint_positions(retargeted_motion: RetargetedMotion, output_path: Path | str) -> Path:
+    retargeted_motion.validate()
     fig, ax = plt.subplots(figsize=(12, 5), dpi=120)
-    for idx, name in enumerate(stage1_motion.joint_names):
-        ax.plot(stage1_motion.joint_pos[:, idx], linewidth=0.8, label=name)
+    for idx, name in enumerate(retargeted_motion.joint_names):
+        ax.plot(retargeted_motion.joint_pos[:, idx], linewidth=0.8, label=name)
     ax.set_title("Joint positions")
     ax.set_xlabel("frame")
     ax.set_ylabel("rad")
-    _legend_if_small(ax, stage1_motion.joint_names)
+    _legend_if_small(ax, retargeted_motion.joint_names)
     return _save(fig, output_path)
 
 
-def plot_joint_velocities(stage1_motion: Stage1Motion, output_path: Path | str) -> Path:
-    stage1_motion.validate()
+def plot_joint_velocities(retargeted_motion: RetargetedMotion, output_path: Path | str) -> Path:
+    retargeted_motion.validate()
     fig, ax = plt.subplots(figsize=(12, 5), dpi=120)
-    for idx, name in enumerate(stage1_motion.joint_names):
-        ax.plot(stage1_motion.joint_vel[:, idx], linewidth=0.8, label=name)
+    for idx, name in enumerate(retargeted_motion.joint_names):
+        ax.plot(retargeted_motion.joint_vel[:, idx], linewidth=0.8, label=name)
     ax.set_title("Joint velocities")
     ax.set_xlabel("frame")
     ax.set_ylabel("rad/s")
-    _legend_if_small(ax, stage1_motion.joint_names)
+    _legend_if_small(ax, retargeted_motion.joint_names)
     return _save(fig, output_path)
 
 
-def plot_joint_limit_margin(stage1_motion: Stage1Motion, robot_spec: RobotSpec, output_path: Path | str) -> Path:
-    stage1_motion.validate()
-    if stage1_motion.joint_names != robot_spec.actuated_joints:
-        raise ValueError("stage1_motion joint_names must match robot_spec actuated_joints.")
-    lower_margin = stage1_motion.joint_pos - robot_spec.joint_lower_rad.reshape(1, -1)
-    upper_margin = robot_spec.joint_upper_rad.reshape(1, -1) - stage1_motion.joint_pos
+def plot_joint_limit_margin(retargeted_motion: RetargetedMotion, robot_spec: RobotSpec, output_path: Path | str) -> Path:
+    retargeted_motion.validate()
+    if retargeted_motion.joint_names != robot_spec.actuated_joints:
+        raise ValueError("retargeted_motion joint_names must match robot_spec actuated_joints.")
+    lower_margin = retargeted_motion.joint_pos - robot_spec.joint_lower_rad.reshape(1, -1)
+    upper_margin = robot_spec.joint_upper_rad.reshape(1, -1) - retargeted_motion.joint_pos
     margin = np.minimum(lower_margin, upper_margin)
     fig, ax = plt.subplots(figsize=(12, 5), dpi=120)
-    for idx, name in enumerate(stage1_motion.joint_names):
+    for idx, name in enumerate(retargeted_motion.joint_names):
         ax.plot(margin[:, idx], linewidth=0.8, label=name)
     ax.axhline(0.0, color="red", linewidth=1.0)
     ax.set_title("Joint limit margin")
     ax.set_xlabel("frame")
     ax.set_ylabel("rad to nearest limit")
-    _legend_if_small(ax, stage1_motion.joint_names)
+    _legend_if_small(ax, retargeted_motion.joint_names)
     return _save(fig, output_path)
 
 
-def plot_root_height(stage1_motion: Stage1Motion, output_path: Path | str) -> Path:
-    stage1_motion.validate()
+def plot_root_height(retargeted_motion: RetargetedMotion, output_path: Path | str) -> Path:
+    retargeted_motion.validate()
     fig, ax = plt.subplots(figsize=(10, 4), dpi=120)
-    ax.plot(stage1_motion.root_pos_w[:, 2])
+    ax.plot(retargeted_motion.root_pos_w[:, 2])
     ax.set_title("Root height")
     ax.set_xlabel("frame")
     ax.set_ylabel("z m")
     return _save(fig, output_path)
 
 
-def plot_frame_success(stage1_motion: Stage1Motion, output_path: Path | str) -> Path:
-    stage1_motion.validate()
+def plot_frame_success(retargeted_motion: RetargetedMotion, output_path: Path | str) -> Path:
+    retargeted_motion.validate()
     fig, ax = plt.subplots(figsize=(10, 3), dpi=120)
-    ax.step(np.arange(stage1_motion.num_frames()), stage1_motion.success.astype(int), where="mid")
+    ax.step(np.arange(retargeted_motion.num_frames()), retargeted_motion.success.astype(int), where="mid")
     ax.set_title("Frame success")
     ax.set_xlabel("frame")
     ax.set_ylabel("success")
@@ -143,10 +143,10 @@ def _legend_if_small(ax, names: list[str]) -> None:
         ax.legend(loc="best")
 
 
-def _diagnostic_series(stage1_motion: Stage1Motion, path: tuple[str, ...]) -> np.ndarray | None:
+def _diagnostic_series(retargeted_motion: RetargetedMotion, path: tuple[str, ...]) -> np.ndarray | None:
     values: list[float] = []
     found = False
-    for diagnostics in stage1_motion.diagnostics:
+    for diagnostics in retargeted_motion.diagnostics:
         cursor = diagnostics
         for key in path:
             if not isinstance(cursor, dict) or key not in cursor:
