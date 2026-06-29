@@ -141,6 +141,158 @@ def test_refinement_quality_dynamics_are_finite_for_normal_and_short_sequences()
                 assert np.isfinite(value)
 
 
+def test_refinement_quality_physical_filter_fails_joint_velocity_acceleration_and_jerk():
+    spec = _make_robot_spec()
+
+    velocity_retargeted = _make_retargeted(spec)
+    velocity_refined = _make_refined(velocity_retargeted)
+    velocity_refined.joint_vel[2, 0] = spec.velocity_limits_rad_s[0] + 0.1
+    velocity_report = evaluate_refinement_quality(velocity_retargeted, velocity_refined, spec)
+
+    assert velocity_report.valid is False
+    assert "joint_velocity_violation" in velocity_report.failures
+
+    retargeted = _make_retargeted(spec)
+    spiky = _make_refined(retargeted)
+    spiky.joint_pos[:, 0] = np.asarray([0.0, 0.0, 0.5, 0.0, 0.0, 0.0], dtype=np.float64)
+    spiky_report = evaluate_refinement_quality(retargeted, spiky, spec, config=_loose_quality_config())
+
+    assert spiky_report.valid is False
+    assert "joint_acceleration_violation" in spiky_report.failures
+    assert "joint_jerk_violation" in spiky_report.failures
+
+
+def test_refinement_quality_physical_filter_fails_absolute_foot_penetration_without_worsening():
+    spec = _make_robot_spec()
+    retargeted = _make_retargeted(spec)
+    refined = _make_refined(retargeted)
+    ankle_idx = refined.body_names.index("left_ankle_roll_link")
+    retargeted.body_pos_w[:, ankle_idx, 2] = -0.04
+    refined.body_pos_w[:, ankle_idx, 2] = -0.04
+
+    report = evaluate_refinement_quality(retargeted, refined, spec, config=_loose_quality_config(), ground_height=0.0)
+
+    assert report.valid is False
+    assert "foot_penetration" in report.failures
+    assert "penetration_worsened" not in report.failures
+
+
+def test_refinement_quality_physical_filter_fails_contact_weighted_floating():
+    spec = _make_robot_spec()
+    retargeted = _make_retargeted(spec)
+    refined = _make_refined(retargeted)
+    ankle_idx = refined.body_names.index("left_ankle_roll_link")
+    refined.body_pos_w[:, ankle_idx, 2] = 0.20
+
+    report = evaluate_refinement_quality(
+        retargeted,
+        refined,
+        spec,
+        config=_loose_quality_config(),
+        contact_score={"left_foot": np.ones(refined.num_frames(), dtype=np.float64)},
+    )
+
+    assert report.valid is False
+    assert "foot_floating" in report.failures
+
+
+def test_refinement_quality_physical_filter_fails_unsupported_and_low_pelvis_motions():
+    spec = _make_robot_spec()
+    retargeted = _make_retargeted(spec)
+    refined = _make_refined(retargeted)
+    zeros = np.zeros(refined.num_frames(), dtype=np.float64)
+
+    unsupported = evaluate_refinement_quality(
+        retargeted,
+        refined,
+        spec,
+        config=_loose_quality_config(),
+        contact_score={"left_foot": zeros, "right_foot": zeros},
+    )
+
+    assert unsupported.valid is False
+    assert "support_unavailable" in unsupported.failures
+    assert unsupported.metrics["unsupported_fraction"] == pytest.approx(1.0)
+
+    low = _make_refined(retargeted)
+    low.root_pos_w[:, 2] = 0.2
+    low.body_pos_w[:, low.body_names.index("pelvis"), 2] = 0.2
+    low_report = evaluate_refinement_quality(retargeted, low, spec, config=_loose_quality_config())
+
+    assert low_report.valid is True
+    assert low_report.metrics["pelvis_height_min_m"] == pytest.approx(0.2)
+
+    enabled_report = evaluate_refinement_quality(
+        retargeted,
+        low,
+        spec,
+        config={
+            **_loose_quality_config(),
+            "physical_feasibility": {"fail_on_pelvis_height": True, "min_pelvis_height_m": 0.45},
+        },
+    )
+
+    assert enabled_report.valid is False
+    assert "pelvis_height_too_low" in enabled_report.failures
+
+
+def test_refinement_quality_physical_filter_fails_base_of_support_violation():
+    spec = _make_robot_spec()
+    retargeted = _make_retargeted(spec)
+    refined = _make_refined(retargeted)
+    refined.root_pos_w[:, 0] += 1.0
+    refined.body_pos_w[:, refined.body_names.index("pelvis"), 0] += 1.0
+    ones = np.ones(refined.num_frames(), dtype=np.float64)
+
+    report = evaluate_refinement_quality(
+        retargeted,
+        refined,
+        spec,
+        config=_loose_quality_config(),
+        contact_score={"left_foot": ones, "right_foot": ones},
+    )
+
+    assert report.valid is False
+    assert "base_of_support_violation" in report.failures
+    assert report.metrics["bos_violation_fraction"] == pytest.approx(1.0)
+
+
+def test_refinement_quality_physical_filter_allows_stable_contact_and_can_be_disabled():
+    spec = _make_robot_spec()
+    retargeted = _make_retargeted(spec)
+    refined = _make_refined(retargeted)
+    ones = np.ones(refined.num_frames(), dtype=np.float64)
+
+    stable = evaluate_refinement_quality(
+        retargeted,
+        refined,
+        spec,
+        contact_score={"left_foot": ones, "right_foot": ones},
+    )
+
+    assert stable.valid is True
+    assert stable.metrics["support_evaluated"] is True
+
+    fast = _make_refined(retargeted)
+    fast.joint_vel[1, 0] = spec.velocity_limits_rad_s[0] + 1.0
+    disabled = evaluate_refinement_quality(retargeted, fast, spec, config={"physical_feasibility": {"enabled": False}})
+
+    assert disabled.valid is True
+    assert disabled.metrics["physical_feasibility_enabled"] is False
+
+    bad_joint = _make_refined(retargeted)
+    bad_joint.joint_pos[1, 0] = spec.joint_upper_rad[0] + 0.1
+    joint_report = evaluate_refinement_quality(
+        retargeted,
+        bad_joint,
+        spec,
+        config={"quality": {"max_joint_deviation_rad": 10.0}, "physical_feasibility": {"enabled": False}},
+    )
+
+    assert joint_report.valid is False
+    assert "joint_limit_violation" in joint_report.failures
+
+
 def test_refinement_quality_uses_contact_object_ground_height_and_local_offsets():
     spec = _make_robot_spec()
     retargeted = _make_retargeted(spec)
@@ -214,7 +366,7 @@ def _make_robot_spec() -> RobotSpec:
 
 def _make_retargeted(spec: RobotSpec, *, frames: int = 6) -> RetargetedMotion:
     root_pos = np.zeros((frames, 3), dtype=np.float64)
-    root_pos[:, 2] = 0.2
+    root_pos[:, 2] = 0.7
     root_quat = np.zeros((frames, 4), dtype=np.float64)
     root_quat[:, 3] = 1.0
     joint_pos = np.zeros((frames, spec.num_dofs), dtype=np.float64)
@@ -262,10 +414,10 @@ def _body_offsets() -> np.ndarray:
     return np.array(
         [
             [0.0, 0.0, 0.0],
-            [0.1, 0.08, -0.2],
-            [0.2, 0.08, -0.2],
-            [0.1, -0.08, -0.2],
-            [0.2, -0.08, -0.2],
+            [0.1, 0.08, -0.7],
+            [0.2, 0.08, -0.7],
+            [0.1, -0.08, -0.7],
+            [0.2, -0.08, -0.7],
             [0.0, 0.0, 0.3],
         ],
         dtype=np.float64,

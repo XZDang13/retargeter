@@ -89,6 +89,8 @@ outputs/05_05_refine/human.npz
 
 Refine fails by default if `RefinementQualityReport.valid` is false. Use `--allow-invalid` to keep invalid outputs for debugging.
 
+Refinement quality includes a post-refine physical feasibility gate for joint limits, velocity, acceleration, jerk, foot penetration/floating, and conservative base-of-support checks. Pelvis height is reported but not a default rejection gate. Override thresholds or disable gates with the `physical_feasibility` section in `--refinement-config`.
+
 `--fps` means input/source FPS override. `--target-fps` resamples SMPL/SMPL-X parameters before FK and controls downstream IK retarget/refinement FPS.
 
 Batch refine runs the same single-clip pipeline for many inputs and writes one standard refine directory per clip. Parallel batch mode is clip-level multiprocessing; each worker creates its own pipeline instance.

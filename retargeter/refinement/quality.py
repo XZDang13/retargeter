@@ -25,6 +25,21 @@ DEFAULT_QUALITY_CONFIG: dict[str, float | bool] = {
     "skating_worsening_tolerance_m_s": 0.005,
     "skating_min_improvement_m_s": 0.0,
 }
+DEFAULT_PHYSICAL_FEASIBILITY_CONFIG: dict[str, float | bool] = {
+    "enabled": True,
+    "max_joint_acceleration_rad_s2": 400.0,
+    "max_joint_jerk_rad_s3": 8000.0,
+    "max_foot_penetration_m": 0.03,
+    "max_weighted_foot_height_m": 0.12,
+    "fail_on_pelvis_height": False,
+    "min_pelvis_height_m": 0.30,
+    "support_contact_threshold": 0.5,
+    "support_max_foot_height_m": 0.08,
+    "max_unsupported_duration_s": 0.5,
+    "max_unsupported_fraction": 0.35,
+    "bos_margin_m": 0.35,
+    "max_bos_violation_fraction": 0.50,
+}
 EPS = 1.0e-12
 
 
@@ -58,6 +73,8 @@ def evaluate_refinement_quality(
 
     _validate_structure(retargeted, refined, robot_spec)
     thresholds = _quality_thresholds(config)
+    physical_thresholds = _physical_feasibility_thresholds(config)
+    report_thresholds = {**thresholds, **physical_thresholds}
     body_names = _body_names(retargeted, refined, config)
     contact_specs = _contact_point_specs(config)
     scores = _contact_score_mapping(contact_score)
@@ -108,12 +125,16 @@ def evaluate_refinement_quality(
             failures.append("skating_not_improved")
 
     metrics.update(_dynamics_metrics(refined, float(refined.fps)))
+    metrics.update(_support_metrics(refined, contact_points, float(resolved_ground), physical_thresholds, contact_available))
+    metrics["physical_feasibility_enabled"] = bool(physical_thresholds["physical_feasibility_enabled"])
+    failures.extend(_physical_feasibility_failures(metrics, physical_thresholds))
+    failures = _unique_failures(failures)
 
     return RefinementQualityReport(
         valid=not failures,
         metrics=metrics,
         failures=failures,
-        thresholds=thresholds,
+        thresholds=report_thresholds,
         metadata={
             "source": "evaluate_refinement_quality",
             "robot": refined.robot,
@@ -319,6 +340,105 @@ def _dynamics_metrics(refined: RefinedMotion, fps: float) -> dict[str, float]:
     }
 
 
+def _support_metrics(
+    refined: RefinedMotion,
+    contact_points: list[_ContactPoint],
+    ground_height: float,
+    thresholds: Mapping[str, Any],
+    contact_available: bool,
+) -> dict[str, Any]:
+    pelvis = _pelvis_or_root_pos(refined)
+    pelvis_height = np.asarray(pelvis[:, 2], dtype=np.float64)
+    frames = int(refined.num_frames())
+    if not contact_available:
+        return {
+            "support_evaluated": False,
+            "pelvis_height_min_m": _finite_min(pelvis_height),
+            "support_frame_count": 0,
+            "unsupported_frame_count": 0,
+            "unsupported_fraction": 0.0,
+            "unsupported_max_duration_s": 0.0,
+            "bos_violation_frame_count": 0,
+            "bos_violation_fraction": 0.0,
+            "bos_violation_max_distance_m": 0.0,
+        }
+
+    contact_threshold = float(thresholds["support_contact_threshold"])
+    max_foot_height = float(thresholds["support_max_foot_height_m"])
+    support_mask = np.zeros((frames,), dtype=bool)
+    bos_violation = np.zeros((frames,), dtype=bool)
+    bos_distance = np.zeros((frames,), dtype=np.float64)
+
+    for frame_idx in range(frames):
+        support_xy = []
+        for point in contact_points:
+            height = float(point.refined_pos_w[frame_idx, 2] - ground_height)
+            if float(point.score[frame_idx]) >= contact_threshold and abs(height) <= max_foot_height:
+                support_xy.append(point.refined_pos_w[frame_idx, :2])
+        if not support_xy:
+            continue
+        support_mask[frame_idx] = True
+        distance = _support_distance_xy(pelvis[frame_idx, :2], np.asarray(support_xy, dtype=np.float64))
+        bos_distance[frame_idx] = distance
+        bos_violation[frame_idx] = distance > float(thresholds["bos_margin_m"])
+
+    unsupported = ~support_mask
+    supported_count = int(np.count_nonzero(support_mask))
+    return {
+        "support_evaluated": True,
+        "pelvis_height_min_m": _finite_min(pelvis_height),
+        "support_frame_count": supported_count,
+        "unsupported_frame_count": int(np.count_nonzero(unsupported)),
+        "unsupported_fraction": float(np.count_nonzero(unsupported) / max(frames, 1)),
+        "unsupported_max_duration_s": _max_true_run_duration(unsupported, float(refined.fps)),
+        "bos_violation_frame_count": int(np.count_nonzero(bos_violation)),
+        "bos_violation_fraction": float(np.count_nonzero(bos_violation) / max(supported_count, 1)),
+        "bos_violation_max_distance_m": _finite_max(bos_distance[support_mask]) if supported_count else 0.0,
+    }
+
+
+def _physical_feasibility_failures(metrics: Mapping[str, Any], thresholds: Mapping[str, Any]) -> list[str]:
+    if not bool(thresholds["physical_feasibility_enabled"]):
+        return []
+
+    failures: list[str] = []
+    if int(metrics["joint_velocity_violation_count"]) > 0:
+        failures.append("joint_velocity_violation")
+    if float(metrics["joint_acceleration_max_rad_s2"]) > float(thresholds["max_joint_acceleration_rad_s2"]):
+        failures.append("joint_acceleration_violation")
+    if float(metrics["joint_jerk_max_rad_s3"]) > float(thresholds["max_joint_jerk_rad_s3"]):
+        failures.append("joint_jerk_violation")
+    if float(metrics["refined_penetration_max_m"]) > float(thresholds["max_foot_penetration_m"]):
+        failures.append("foot_penetration")
+    if (
+        bool(metrics["contact_available"])
+        and float(metrics["refined_weighted_foot_height_max_m"]) > float(thresholds["max_weighted_foot_height_m"])
+    ):
+        failures.append("foot_floating")
+    if bool(thresholds["fail_on_pelvis_height"]) and float(metrics["pelvis_height_min_m"]) < float(thresholds["min_pelvis_height_m"]):
+        failures.append("pelvis_height_too_low")
+    if bool(metrics["support_evaluated"]):
+        if (
+            float(metrics["unsupported_max_duration_s"]) > float(thresholds["max_unsupported_duration_s"])
+            or float(metrics["unsupported_fraction"]) > float(thresholds["max_unsupported_fraction"])
+        ):
+            failures.append("support_unavailable")
+        if float(metrics["bos_violation_fraction"]) > float(thresholds["max_bos_violation_fraction"]):
+            failures.append("base_of_support_violation")
+    return failures
+
+
+def _unique_failures(failures: list[str]) -> list[str]:
+    seen = set()
+    unique = []
+    for failure in failures:
+        if failure in seen:
+            continue
+        seen.add(failure)
+        unique.append(failure)
+    return unique
+
+
 def _contact_points(
     retargeted: RetargetedMotion,
     refined: RefinedMotion,
@@ -366,6 +486,18 @@ def _quality_thresholds(config: Mapping[str, Any] | None) -> dict[str, Any]:
     for key, value in thresholds.items():
         if isinstance(value, float) and value < 0.0:
             raise ValueError(f"quality.{key} must be non-negative, got {value!r}.")
+    return thresholds
+
+
+def _physical_feasibility_thresholds(config: Mapping[str, Any] | None) -> dict[str, Any]:
+    thresholds: dict[str, Any] = {}
+    for key, default in DEFAULT_PHYSICAL_FEASIBILITY_CONFIG.items():
+        value = _cfg(config, "physical_feasibility", key, default)
+        out_key = "physical_feasibility_enabled" if key == "enabled" else key
+        thresholds[out_key] = bool(value) if isinstance(default, bool) else _finite_float(value, f"physical_feasibility.{key}")
+    for key, value in thresholds.items():
+        if key != "physical_feasibility_enabled" and isinstance(value, float) and value < 0.0:
+            raise ValueError(f"physical_feasibility.{key} must be non-negative, got {value!r}.")
     return thresholds
 
 
@@ -454,6 +586,98 @@ def _body_point_w(body_pos: np.ndarray, body_quat: np.ndarray, local_pos: np.nda
     return pos + _quat_rotate_xyzw(quat, np.broadcast_to(local_pos.reshape(1, 3), pos.shape))
 
 
+def _pelvis_or_root_pos(refined: RefinedMotion) -> np.ndarray:
+    if "pelvis" in refined.body_names:
+        return np.asarray(refined.body_pos_w[:, refined.body_names.index("pelvis"), :], dtype=np.float64)
+    return np.asarray(refined.root_pos_w, dtype=np.float64)
+
+
+def _support_distance_xy(point_xy: np.ndarray, support_xy: np.ndarray) -> float:
+    point = np.asarray(point_xy, dtype=np.float64).reshape(2)
+    support = _unique_points_xy(np.asarray(support_xy, dtype=np.float64))
+    if support.shape[0] == 0 or not np.all(np.isfinite(point)):
+        return 0.0
+    if support.shape[0] == 1:
+        return float(np.linalg.norm(point - support[0]))
+    hull = _convex_hull_xy(support)
+    if hull.shape[0] == 1:
+        return float(np.linalg.norm(point - hull[0]))
+    if hull.shape[0] == 2:
+        return _point_segment_distance_xy(point, hull[0], hull[1])
+    if _point_in_convex_polygon_xy(point, hull):
+        return 0.0
+    distances = [
+        _point_segment_distance_xy(point, hull[idx], hull[(idx + 1) % hull.shape[0]])
+        for idx in range(hull.shape[0])
+    ]
+    return float(min(distances)) if distances else 0.0
+
+
+def _unique_points_xy(points: np.ndarray) -> np.ndarray:
+    if points.size == 0:
+        return np.zeros((0, 2), dtype=np.float64)
+    finite = points[np.all(np.isfinite(points), axis=1)]
+    if finite.size == 0:
+        return np.zeros((0, 2), dtype=np.float64)
+    rounded = np.round(finite, decimals=9)
+    _, indices = np.unique(rounded, axis=0, return_index=True)
+    return finite[np.sort(indices)]
+
+
+def _convex_hull_xy(points: np.ndarray) -> np.ndarray:
+    ordered = sorted((float(x), float(y)) for x, y in points)
+    if len(ordered) <= 1:
+        return np.asarray(ordered, dtype=np.float64).reshape(-1, 2)
+
+    def cross(origin, a, b) -> float:
+        return (a[0] - origin[0]) * (b[1] - origin[1]) - (a[1] - origin[1]) * (b[0] - origin[0])
+
+    lower = []
+    for point in ordered:
+        while len(lower) >= 2 and cross(lower[-2], lower[-1], point) <= EPS:
+            lower.pop()
+        lower.append(point)
+    upper = []
+    for point in reversed(ordered):
+        while len(upper) >= 2 and cross(upper[-2], upper[-1], point) <= EPS:
+            upper.pop()
+        upper.append(point)
+    return np.asarray(lower[:-1] + upper[:-1], dtype=np.float64)
+
+
+def _point_in_convex_polygon_xy(point: np.ndarray, polygon: np.ndarray) -> bool:
+    for idx in range(polygon.shape[0]):
+        a = polygon[idx]
+        b = polygon[(idx + 1) % polygon.shape[0]]
+        cross = (b[0] - a[0]) * (point[1] - a[1]) - (b[1] - a[1]) * (point[0] - a[0])
+        if cross < -EPS:
+            return False
+    return True
+
+
+def _point_segment_distance_xy(point: np.ndarray, a: np.ndarray, b: np.ndarray) -> float:
+    segment = b - a
+    denom = float(np.dot(segment, segment))
+    if denom <= EPS:
+        return float(np.linalg.norm(point - a))
+    t = float(np.clip(np.dot(point - a, segment) / denom, 0.0, 1.0))
+    projection = a + t * segment
+    return float(np.linalg.norm(point - projection))
+
+
+def _max_true_run_duration(mask: np.ndarray, fps: float) -> float:
+    values = np.asarray(mask, dtype=bool)
+    max_run = 0
+    current = 0
+    for value in values:
+        if value:
+            current += 1
+            max_run = max(max_run, current)
+        else:
+            current = 0
+    return float(max_run / max(float(fps), EPS))
+
+
 def _finite_difference_stats(values: np.ndarray, fps: float, *, order: int, vector_norm: bool) -> tuple[float, float]:
     if values.shape[0] <= order:
         return 0.0, 0.0
@@ -521,6 +745,14 @@ def _finite_max(value: np.ndarray) -> float:
     if finite.size == 0:
         return 0.0
     return float(np.max(finite))
+
+
+def _finite_min(value: np.ndarray) -> float:
+    arr = np.asarray(value, dtype=np.float64)
+    finite = arr[np.isfinite(arr)]
+    if finite.size == 0:
+        return 0.0
+    return float(np.min(finite))
 
 
 def _worst_joint_name(violation: np.ndarray, joint_names: list[str]) -> str | None:

@@ -49,7 +49,7 @@ class MockBackend:
         body_quat = np.zeros((len(self.robot_spec.body_names), 4), dtype=np.float64)
         body_quat[:, 3] = 1.0
         body_pos[:] = state.root_pos_w
-        body_pos[:, 2] += np.linspace(0.0, 0.6, len(self.robot_spec.body_names))
+        body_pos[:, 2] += _mock_robot_body_z_offsets(self.robot_spec.body_names)
         return RobotBodyState(list(self.robot_spec.body_names), body_pos, body_quat)
 
     def make_newton_state(self, state: IKState):
@@ -66,7 +66,7 @@ class FakeTorchFK(torch.nn.Module):
     def forward(self, root_pos: torch.Tensor, root_quat_xyzw: torch.Tensor, joint_pos: torch.Tensor) -> TorchRobotFKResult:
         offsets = torch.zeros((len(self.body_names), 3), dtype=root_pos.dtype, device=root_pos.device)
         offsets[:, 0] = self.x_offset
-        offsets[:, 2] = torch.linspace(0.0, 0.6, len(self.body_names), dtype=root_pos.dtype, device=root_pos.device)
+        offsets[:, 2] = torch.as_tensor(_mock_robot_body_z_offsets(self.body_names), dtype=root_pos.dtype, device=root_pos.device)
         body_pos = root_pos[:, None, :] + offsets[None, :, :]
         body_quat = root_quat_xyzw[:, None, :].expand(-1, len(self.body_names), -1)
         return TorchRobotFKResult(body_names=list(self.body_names), body_pos_w=body_pos, body_quat_xyzw=body_quat)
@@ -107,6 +107,32 @@ class FakeViewer:
 
 def fake_viewer_factory(viewer_kind, options):
     return FakeViewer(options.get("output_path"))
+
+
+def _mock_robot_body_z_offsets(body_names) -> np.ndarray:
+    offsets = []
+    for name in body_names:
+        if name == "pelvis":
+            offsets.append(0.0)
+        elif "toe" in name or "ankle" in name:
+            offsets.append(-0.72)
+        elif "knee" in name:
+            offsets.append(-0.40)
+        elif "hip" in name:
+            offsets.append(-0.12)
+        elif "waist" in name:
+            offsets.append(0.16)
+        elif "torso" in name:
+            offsets.append(0.38)
+        elif "shoulder" in name:
+            offsets.append(0.42)
+        elif "elbow" in name:
+            offsets.append(0.20)
+        elif "wrist" in name or "hand" in name:
+            offsets.append(0.05)
+        else:
+            offsets.append(0.0)
+    return np.asarray(offsets, dtype=np.float64)
 
 
 def test_online_retargeter_step_uses_warm_start_and_reset():
@@ -358,6 +384,89 @@ def test_refine_rejects_invalid_quality_unless_allowed(tmp_path: Path):
     )
     assert result.quality_report.valid is False
     assert (tmp_path / "allowed" / "final_motion.npz").exists()
+
+
+def test_refine_physical_feasibility_failure_exports_invalid_quality_and_allow_invalid(tmp_path: Path):
+    config = {
+        "refiner": {"iterations": 0, "dtype": "float64", "lbfgs_enabled": False},
+        "physical_feasibility": {"fail_on_pelvis_height": True, "min_pelvis_height_m": 10.0},
+    }
+    invalid_output = tmp_path / "physical_invalid"
+
+    with pytest.raises(RuntimeError, match="RefinementQualityReport"):
+        RefinePipeline(
+            robot="g1_29",
+            backend_factory=MockBackend,
+            refinement_fk_factory=lambda spec: FakeTorchFK(spec),
+        ).run(
+            input_path="mock",
+            output_dir=invalid_output,
+            mock_frames=2,
+            refinement_config=config,
+        )
+
+    invalid_quality = json.loads((invalid_output / "final_quality.json").read_text(encoding="utf-8"))
+    invalid_report = invalid_quality["quality_report"]
+    assert invalid_report["valid"] is False
+    assert "pelvis_height_too_low" in invalid_report["failures"]
+
+    config_path = tmp_path / "physical_config.json"
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+    allowed_output = tmp_path / "physical_allowed"
+    assert refine.main(
+        [
+            "--input",
+            "mock",
+            "--output",
+            str(allowed_output),
+            "--mock-frames",
+            "2",
+            "--refinement-config",
+            str(config_path),
+            "--allow-invalid",
+        ],
+        backend_factory=MockBackend,
+        refinement_fk_factory=lambda spec: FakeTorchFK(spec),
+    ) == 0
+    allowed_quality = json.loads((allowed_output / "final_quality.json").read_text(encoding="utf-8"))
+    assert allowed_quality["valid"] is False
+    assert "pelvis_height_too_low" in allowed_quality["quality_report"]["failures"]
+
+
+def test_refine_cli_batch_physical_feasibility_records_invalid_items(tmp_path: Path):
+    config_path = tmp_path / "physical_config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "refiner": {"iterations": 0, "dtype": "float64", "lbfgs_enabled": False},
+                "physical_feasibility": {"fail_on_pelvis_height": True, "min_pelvis_height_m": 10.0},
+            }
+        ),
+        encoding="utf-8",
+    )
+    output = tmp_path / "physical_batch"
+
+    assert refine.main(
+        [
+            "--inputs",
+            "mock",
+            "mock",
+            "--output",
+            str(output),
+            "--mock-frames",
+            "2",
+            "--refinement-config",
+            str(config_path),
+        ],
+        backend_factory=MockBackend,
+        refinement_fk_factory=lambda spec: FakeTorchFK(spec),
+    ) == 1
+
+    manifest = json.loads((output / "batch_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["success_count"] == 0
+    assert manifest["failure_count"] == 2
+    assert [item["status"] for item in manifest["items"]] == ["invalid", "invalid"]
+    assert all("pelvis_height_too_low" in item["error"] for item in manifest["items"])
 
 
 def test_viewer_pipeline_loads_refine_directory_refinement_without_success_field(tmp_path: Path):
