@@ -398,6 +398,7 @@ class RefinePipeline:
         native_batch: bool = True,
         batch_size: int = 8,
         preprocess_workers: int = 1,
+        batch_order: str = "length",
         progress: ProgressReporter | None = None,
     ) -> RefineBatchResult:
         reporter = get_progress(progress)
@@ -408,6 +409,8 @@ class RefinePipeline:
             raise ValueError("batch_size must be positive.")
         if preprocess_workers <= 0:
             raise ValueError("preprocess_workers must be positive.")
+        if batch_order not in {"input", "length"}:
+            raise ValueError("batch_order must be 'input' or 'length'.")
 
         if workers > 1 and (self.backend_factory is not None or self.refinement_fk_factory is not None):
             raise ValueError("Injected backend/refinement factories are only supported for workers=1.")
@@ -462,6 +465,7 @@ class RefinePipeline:
                 overwrite=overwrite,
                 dry_run=dry_run,
                 preprocess_workers=preprocess_workers,
+                batch_order=batch_order,
                 progress=reporter,
             )
         else:

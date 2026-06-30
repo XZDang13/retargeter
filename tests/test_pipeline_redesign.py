@@ -111,6 +111,29 @@ def fake_viewer_factory(viewer_kind, options):
     return FakeViewer(options.get("output_path"))
 
 
+def _write_minimal_smpl_motion(path: Path, *, frames: int = 4, fps: float = 30.0) -> None:
+    np.savez_compressed(
+        path,
+        trans=np.zeros((frames, 3), dtype=np.float64),
+        poses=np.zeros((frames, 165), dtype=np.float64),
+        mocap_frame_rate=np.asarray(float(fps)),
+        gender=np.asarray("neutral"),
+        surface_model_type=np.asarray("smplx"),
+        betas=np.zeros(16, dtype=np.float64),
+    )
+
+
+def _write_neutral_template(path: Path) -> None:
+    np.savez_compressed(
+        path,
+        gender=np.asarray("neutral"),
+        surface_model_type=np.asarray("smplx"),
+        markers_latent=np.zeros((41, 3), dtype=np.float64),
+        latent_labels=np.asarray([f"m{i}" for i in range(41)]),
+        betas=np.zeros(16, dtype=np.float64),
+    )
+
+
 def _mock_robot_body_z_offsets(body_names) -> np.ndarray:
     offsets = []
     for name in body_names:
@@ -509,7 +532,7 @@ def test_refine_cli_batch_preserve_tree_dry_run(tmp_path: Path):
     nested = input_dir / "a"
     nested.mkdir(parents=True)
     walk = nested / "walk.npz"
-    walk.touch()
+    _write_minimal_smpl_motion(walk)
     output = tmp_path / "batch_tree"
 
     assert refine.main(
@@ -536,7 +559,9 @@ def test_refine_cli_input_dir_defaults_to_npz_auto_detection(tmp_path: Path):
     input_dir = tmp_path / "data"
     input_dir.mkdir()
     walk = input_dir / "walk.npz"
-    walk.touch()
+    _write_minimal_smpl_motion(walk)
+    neutral = input_dir / "neutral_stagei.npz"
+    _write_neutral_template(neutral)
     (input_dir / "ignore.npy").touch()
     output = tmp_path / "batch_npz_default"
 
@@ -554,6 +579,26 @@ def test_refine_cli_input_dir_defaults_to_npz_auto_detection(tmp_path: Path):
     assert manifest["input_count"] == 1
     assert manifest["items"][0]["input"] == str(walk.resolve())
     assert Path(manifest["items"][0]["output_dir"]) == output / "walk"
+
+
+def test_refine_cli_explicit_input_can_still_include_neutral_stagei(tmp_path: Path):
+    neutral = tmp_path / "neutral_stagei.npz"
+    _write_neutral_template(neutral)
+    output = tmp_path / "explicit_neutral"
+
+    assert refine.main(
+        [
+            "--inputs",
+            str(neutral),
+            "--output",
+            str(output),
+            "--dry-run",
+        ]
+    ) == 0
+
+    manifest = json.loads((output / "batch_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["input_count"] == 1
+    assert manifest["items"][0]["input"] == str(neutral.resolve())
 
 
 def test_refine_pipeline_run_batch_returns_lightweight_results(tmp_path: Path):
@@ -760,6 +805,47 @@ def test_viewer_pipeline_auto_skips_meshless_human_npz(tmp_path: Path):
     assert result.human_path == output / "human.npz"
     assert result.replay_result.frame_count == 3
     assert (tmp_path / "viewer" / "newton_replay.json").exists()
+
+
+def test_viewer_pipeline_auto_loads_human_for_rejected_refine_output(tmp_path: Path):
+    spec = RobotSpec.from_yaml(G1_29_ROBOT)
+    output = tmp_path / "refine_rejected"
+    rejected = output / "rejected"
+    rejected.mkdir(parents=True)
+    refined = _make_refinement_motion(spec, frames=3)
+    export_refined_motion(refined, rejected / "final_motion.npz")
+    human = pipeline_module.make_mock_canonical_motion(num_frames=3)
+    human.vertices_w = np.zeros((3, 4, 3), dtype=np.float64)
+    human.mesh_faces = np.asarray([[0, 1, 2], [0, 2, 3]], dtype=np.int32)
+    export_canonical_human_motion_npz(human, output / "human.npz")
+
+    created = []
+
+    def recording_viewer_factory(viewer_kind, options):
+        viewer_instance = FakeViewer(options.get("output_path"))
+        created.append(viewer_instance)
+        return viewer_instance
+
+    from_directory = ViewerPipeline().replay(
+        input_path=output,
+        output_dir=tmp_path / "viewer_dir",
+        viewer="file",
+        backend=MockBackend(spec),
+        viewer_factory=recording_viewer_factory,
+    )
+    from_rejected_file = ViewerPipeline().replay(
+        input_path=rejected / "final_motion.npz",
+        output_dir=tmp_path / "viewer_file",
+        viewer="file",
+        backend=MockBackend(spec),
+        viewer_factory=recording_viewer_factory,
+    )
+
+    assert from_directory.motion_path == rejected / "final_motion.npz"
+    assert from_directory.human_path == output / "human.npz"
+    assert from_rejected_file.human_path == output / "human.npz"
+    assert len(created[0].meshes) == 3
+    assert len(created[1].meshes) == 3
 
 
 def test_viewer_cli_auto_loads_online_directory(tmp_path: Path):

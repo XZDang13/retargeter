@@ -11,6 +11,7 @@ from retargeter.refinement import load_refined_motion_npz
 
 PRIMARY_REPLAY_MOTION_NAMES = ("final_motion.npz", "online_motion.npz", "retargeted_motion.npz")
 REPLAY_MOTION_PRIORITY = PRIMARY_REPLAY_MOTION_NAMES
+REJECTED_REPLAY_MOTION_NAMES = ("final_motion.npz",)
 
 
 def export_canonical_human_motion_npz(
@@ -128,16 +129,36 @@ def resolve_replay_motion_path(path: Path | str) -> Path:
         candidate = input_path / name
         if candidate.exists():
             return candidate
+    rejected_dir = input_path / "rejected"
+    for name in REJECTED_REPLAY_MOTION_NAMES:
+        candidate = rejected_dir / name
+        if candidate.exists():
+            return candidate
     raise FileNotFoundError(
-        f"Could not find replay motion in {input_path}. Expected one of {list(REPLAY_MOTION_PRIORITY)}."
+        f"Could not find replay motion in {input_path}. Expected one of {list(REPLAY_MOTION_PRIORITY)} "
+        "or rejected/final_motion.npz."
     )
 
 
 def default_human_path_for_replay_input(path: Path | str) -> Path | None:
     input_path = Path(path)
+    candidates: list[Path] = []
     directory = input_path if input_path.is_dir() else input_path.parent
-    candidate = directory / "human.npz"
-    return candidate if candidate.exists() else None
+    candidates.append(directory / "human.npz")
+    if directory.name == "rejected":
+        candidates.append(directory.parent / "human.npz")
+    try:
+        motion_path = resolve_replay_motion_path(input_path)
+    except (FileNotFoundError, ValueError):
+        motion_path = None
+    if motion_path is not None:
+        candidates.append(motion_path.parent / "human.npz")
+        if motion_path.parent.name == "rejected":
+            candidates.append(motion_path.parent.parent / "human.npz")
+    for candidate in _dedupe_paths(candidates):
+        if candidate.exists():
+            return candidate
+    return None
 
 
 def load_replay_motion_npz(path: Path | str):
@@ -155,3 +176,15 @@ def load_replay_motion_npz(path: Path | str):
 
 def _regions_from_keys(keys: list[str], prefix: str) -> list[str]:
     return sorted(key[len(prefix) :] for key in keys if key.startswith(prefix))
+
+
+def _dedupe_paths(paths: list[Path]) -> list[Path]:
+    seen: set[str] = set()
+    output: list[Path] = []
+    for path in paths:
+        key = str(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        output.append(path)
+    return output

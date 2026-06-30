@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from retargeter.batch import assign_device, discover_inputs, parse_gpu_ids
+from retargeter.batch import assign_device, discover_inputs, filter_motion_inputs, parse_gpu_ids
 from retargeter.pipeline import RefinePipeline, load_refinement_config_file, refinement_config_with_overrides
 from retargeter.progress import make_progress
 
@@ -74,6 +74,7 @@ def main(argv: list[str] | None = None, *, backend_factory=None, refinement_fk_f
             native_batch=bool(args.native_batch),
             batch_size=int(args.batch_size),
             preprocess_workers=int(args.preprocess_workers),
+            batch_order=args.batch_order,
             progress=progress,
         )
         print(batch_result.manifest_path)
@@ -151,6 +152,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--workers", type=int, default=1, help="Number of batch worker processes.")
     parser.add_argument("--batch-size", type=int, default=8, help="Native batch microbatch size.")
     parser.add_argument(
+        "--batch-order",
+        choices=["length", "input"],
+        default="length",
+        help="Native batch grouping order. 'length' buckets clips by estimated frame count; 'input' preserves input order.",
+    )
+    parser.add_argument(
         "--preprocess-workers",
         type=int,
         default=1,
@@ -171,6 +178,13 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--overwrite", action="store_true", help="Reprocess items even when resume/skip-existing would skip.")
     parser.add_argument("--input-list", type=Path, default=None, help="Text file containing batch inputs, one per line.")
     parser.add_argument("--exclude-pattern", action="append", default=None, help="Exclude discovered batch inputs by fnmatch pattern.")
+    parser.add_argument(
+        "--motion-filter",
+        choices=["auto", "off"],
+        default="auto",
+        help="For --input-dir, skip files that are not structurally valid SMPL/SMPL-X motion sequences.",
+    )
+    parser.add_argument("--min-motion-frames", type=int, default=2, help="Minimum frame count for --input-dir motion filtering.")
     parser.add_argument("--preserve-tree", action="store_true", help="Preserve --input-dir relative paths under --output.")
     parser.add_argument("--dry-run", action="store_true", help="Write planned batch manifest without retargeting.")
     parser.add_argument("--summary-csv", type=Path, default=None, help="Optional CSV summary path for batch runs.")
@@ -179,14 +193,45 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _batch_inputs_from_args(args: argparse.Namespace) -> list[Path | str]:
-    return discover_inputs(
+    explicit_inputs = discover_inputs(
         inputs=args.inputs,
-        input_dir=args.input_dir,
+        input_dir=None,
         patterns=args.input_pattern or ["*.npz"],
-        recursive=bool(args.recursive),
+        recursive=False,
         input_list=args.input_list,
         exclude_patterns=args.exclude_pattern,
     )
+    if args.input_dir is None:
+        return explicit_inputs
+
+    directory_inputs = discover_inputs(
+        inputs=None,
+        input_dir=args.input_dir,
+        patterns=args.input_pattern or ["*.npz"],
+        recursive=bool(args.recursive),
+        input_list=None,
+        exclude_patterns=args.exclude_pattern,
+    )
+    if args.motion_filter == "auto":
+        directory_inputs = filter_motion_inputs(directory_inputs, min_frames=int(args.min_motion_frames))
+    return _merge_batch_inputs(explicit_inputs, directory_inputs)
+
+
+def _merge_batch_inputs(*groups: list[Path | str]) -> list[Path | str]:
+    merged: list[Path | str] = []
+    seen: set[str] = set()
+    for group in groups:
+        for value in group:
+            if str(value).lower() == "mock":
+                merged.append("mock")
+                continue
+            path = Path(value).expanduser().resolve(strict=False)
+            key = str(path)
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(path)
+    return merged
 
 
 def _is_batch_mode(args: argparse.Namespace) -> bool:
@@ -207,6 +252,8 @@ def _validate_input_mode(parser: argparse.ArgumentParser, args: argparse.Namespa
         parser.error("--batch-size must be positive.")
     if args.preprocess_workers <= 0:
         parser.error("--preprocess-workers must be positive.")
+    if args.min_motion_frames <= 0:
+        parser.error("--min-motion-frames must be positive.")
     if batch_mode and not args.native_batch and args.preprocess_workers != 1:
         parser.error("--preprocess-workers is only supported with native batch mode. Use --workers with --no-native-batch.")
 

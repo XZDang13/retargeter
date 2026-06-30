@@ -92,7 +92,7 @@ Refinement quality includes a post-refine physical feasibility gate for joint li
 
 Refine progress uses `tqdm` on stderr. `--progress auto` is the default and shows bars in interactive terminals; use `--progress on` to force progress in logs or `--progress off` for quiet scripting.
 
-Batch refine writes one standard refine directory per clip. By default it uses native solver-level microbatches for Newton IK and Torch refinement while keeping quality, export, and manifest records per clip. Use `--batch-size` to control the native IK/refine microbatch size, and `--preprocess-workers` to fan out SMPL/SMPL-X loading, resampling, FK, contact, and `human.npz` export before each microbatch. Pass `--no-native-batch` with `--workers` only when you want the legacy per-item multiprocessing wrapper.
+Batch refine writes one standard refine directory per clip. By default it uses native solver-level microbatches for Newton IK and Torch refinement while keeping quality, export, and manifest records per clip. Native batches are grouped by estimated post-resample frame count so similar-length clips share a padded batch; pass `--batch-order input` only when you need old input-order grouping. Use `--batch-size` to control the native IK/refine microbatch size, and `--preprocess-workers` to fan out SMPL/SMPL-X loading, resampling, FK, contact, and `human.npz` export before each microbatch. Pass `--no-native-batch` with `--workers` only when you want the legacy per-item multiprocessing wrapper.
 
 ```bash
 PYTHONPATH=. python -m retargeter.cli.refine \
@@ -111,7 +111,7 @@ PYTHONPATH=. python -m retargeter.cli.refine \
   --output outputs/refine_batch
 ```
 
-Batch inputs can also come from `--inputs` or a newline-separated `--input-list`. `--input-dir` auto-detects `.npz` files by default; use repeatable `--input-pattern` only when you want a different or additional glob. Batch outputs are written under `outputs/refine_batch/<input_stem>/` by default; duplicate stems use `__2`, `__3`, and so on. With `--preserve-tree`, files discovered under `--input-dir` keep their relative directory layout under the output root.
+Batch inputs can also come from `--inputs` or a newline-separated `--input-list`. `--input-dir` auto-detects `.npz` files by default and uses a structural motion filter to skip template/calibration files such as CMU `neutral_stagei.npz`: accepted files must look like SMPL/SMPL-X motion sequences with time-series translation and pose arrays. Use `--motion-filter off` to disable this, and use repeatable `--input-pattern` only when you want a different or additional glob. Batch outputs are written under `outputs/refine_batch/<input_stem>/` by default; duplicate stems use `__2`, `__3`, and so on. With `--preserve-tree`, files discovered under `--input-dir` keep their relative directory layout under the output root.
 
 In native batch mode, `--gpu-ids` selects the refinement device, while SMPL/SMPL-X preprocessing still uses `--device`.
 
@@ -131,10 +131,10 @@ PYTHONPATH=. python -m retargeter.cli.viewer \
 Directory input priority is:
 
 ```bash
-final_motion.npz -> online_motion.npz -> retargeted_motion.npz
+final_motion.npz -> online_motion.npz -> retargeted_motion.npz -> rejected/final_motion.npz
 ```
 
-If the directory contains `human.npz`, viewer uses it automatically as a SMPL-X mesh overlay. You can also pass it explicitly:
+If the replay directory contains `human.npz`, viewer uses it automatically as a SMPL-X mesh overlay. For rejected refine outputs, `outputs/clip/rejected/final_motion.npz` also autodetects `outputs/clip/human.npz`; if no human file exists, the viewer replays the robot motion only. You can also pass a human file explicitly:
 
 ```bash
 PYTHONPATH=. python -m retargeter.cli.viewer \

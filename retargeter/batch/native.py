@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
 
+import numpy as np
+
 from retargeter.newton import BatchSequenceIKRetargetRunner, NewtonIKRetargetSolver, TorchRobotFK
 from retargeter.progress import ProgressReporter, get_progress
 from retargeter.refinement import evaluate_refinement_quality, export_refined_motion, run_refinement, run_refinement_batch
@@ -16,6 +18,36 @@ from retargeter.scale import IKTargetBuilder
 
 from .manifest import BatchItemRecord, BatchManifest, load_manifest, save_manifest, summarize, update_item
 from .worker import RefineBatchTask, _quality_summary_from_report, _refinement_config_for_task
+
+
+FRAME_COUNT_KEYS = (
+    "trans",
+    "transl",
+    "root_trans_offset",
+    "pose_aa",
+    "pose_body",
+    "poses",
+    "body_pos_w",
+    "body_quat_xyzw",
+    "root_pos_w",
+    "joint_pos",
+)
+FPS_KEYS = ("fps", "mocap_fps", "mocap_frame_rate", "mocap_framerate", "frame_rate", "framerate")
+NON_FRAME_KEYS = {
+    "betas",
+    "body_names",
+    "faces",
+    "fps",
+    "gender",
+    "joint_names",
+    "mesh_faces",
+    "mocap_fps",
+    "mocap_frame_rate",
+    "mocap_framerate",
+    "frame_rate",
+    "framerate",
+}
+BATCH_ORDER_VALUES = {"input", "length"}
 
 
 @dataclass
@@ -55,12 +87,15 @@ class NativeBatchRefineRunner:
         overwrite: bool = False,
         dry_run: bool = False,
         preprocess_workers: int = 1,
+        batch_order: str = "length",
         progress: ProgressReporter | None = None,
     ) -> BatchManifest:
         if batch_size <= 0:
             raise ValueError("batch_size must be positive.")
         if preprocess_workers <= 0:
             raise ValueError("preprocess_workers must be positive.")
+        if batch_order not in BATCH_ORDER_VALUES:
+            raise ValueError(f"batch_order must be one of {sorted(BATCH_ORDER_VALUES)}, got {batch_order!r}.")
         reporter = get_progress(progress)
         task_list = list(tasks)
         manifest = _initial_manifest(
@@ -78,10 +113,11 @@ class NativeBatchRefineRunner:
             return manifest
 
         runnable = [task for task in task_list if _record_for_task(manifest, task).status == "pending"]
+        batches = _task_batches(runnable, batch_size=batch_size, batch_order=batch_order)
         if preprocess_workers > 1:
             return self._run_with_parallel_preprocess(
                 manifest,
-                runnable,
+                batches,
                 batch_size=batch_size,
                 preprocess_workers=preprocess_workers,
                 fail_fast=fail_fast,
@@ -91,10 +127,9 @@ class NativeBatchRefineRunner:
         stop_after_chunk = False
         with reporter.bar(total=len(runnable), desc="Batch refine", unit="clip") as bar:
             bar.set_postfix(_native_progress_postfix(manifest, batch_size=batch_size), refresh=False)
-            for start in range(0, len(runnable), batch_size):
+            for batch_index, chunk in enumerate(batches):
                 if stop_after_chunk:
                     break
-                chunk = runnable[start : start + batch_size]
                 for task in chunk:
                     update_item(manifest, _running_record(task))
                 save_manifest(self.manifest_path, manifest)
@@ -107,7 +142,7 @@ class NativeBatchRefineRunner:
                     if fail_fast and result.status == "failed":
                         stop_after_chunk = True
                 if stop_after_chunk:
-                    remaining = runnable[start + len(chunk) :]
+                    remaining = _remaining_tasks(batches, batch_index)
                     for task in remaining:
                         update_item(manifest, _skipped_record(task, reason="fail_fast"))
                     save_manifest(self.manifest_path, manifest)
@@ -119,7 +154,7 @@ class NativeBatchRefineRunner:
     def _run_with_parallel_preprocess(
         self,
         manifest: BatchManifest,
-        runnable: list[RefineBatchTask],
+        batches: list[list[RefineBatchTask]],
         *,
         batch_size: int,
         preprocess_workers: int,
@@ -128,16 +163,16 @@ class NativeBatchRefineRunner:
     ) -> BatchManifest:
         stop_after_chunk = False
         context = multiprocessing.get_context("spawn")
-        with reporter.bar(total=len(runnable), desc="Batch refine", unit="clip") as bar:
+        total = sum(len(batch) for batch in batches)
+        with reporter.bar(total=total, desc="Batch refine", unit="clip") as bar:
             bar.set_postfix(
                 _native_progress_postfix(manifest, batch_size=batch_size, preprocess_workers=preprocess_workers),
                 refresh=False,
             )
             with concurrent.futures.ProcessPoolExecutor(max_workers=preprocess_workers, mp_context=context) as executor:
-                for start in range(0, len(runnable), batch_size):
+                for batch_index, chunk in enumerate(batches):
                     if stop_after_chunk:
                         break
-                    chunk = runnable[start : start + batch_size]
                     for task in chunk:
                         update_item(manifest, _running_record(task))
                     save_manifest(self.manifest_path, manifest)
@@ -169,7 +204,7 @@ class NativeBatchRefineRunner:
                         if fail_fast and result.status == "failed":
                             stop_after_chunk = True
                     if stop_after_chunk:
-                        remaining = runnable[start + len(chunk) :]
+                        remaining = _remaining_tasks(batches, batch_index)
                         for task in remaining:
                             update_item(manifest, _skipped_record(task, reason="fail_fast"))
                         save_manifest(self.manifest_path, manifest)
@@ -305,6 +340,120 @@ class NativeBatchRefineRunner:
                 except Exception as exc:
                     records.append(_failed_record(item.task, item.start_time, exc))
         return records
+
+
+def _task_batches(tasks: Sequence[RefineBatchTask], *, batch_size: int, batch_order: str) -> list[list[RefineBatchTask]]:
+    if batch_order == "input":
+        return _chunk_tasks(list(tasks), batch_size)
+    if batch_order == "length":
+        return _length_bucketed_task_batches(tasks, batch_size=batch_size)
+    raise ValueError(f"batch_order must be one of {sorted(BATCH_ORDER_VALUES)}, got {batch_order!r}.")
+
+
+def _length_bucketed_task_batches(tasks: Sequence[RefineBatchTask], *, batch_size: int) -> list[list[RefineBatchTask]]:
+    indexed = [(index, _estimate_task_frame_count(task), task) for index, task in enumerate(tasks)]
+    indexed.sort(key=lambda item: (item[1] is None, item[1] if item[1] is not None else 0, item[0]))
+    return _chunk_tasks([task for _, _, task in indexed], batch_size)
+
+
+def _chunk_tasks(tasks: list[RefineBatchTask], batch_size: int) -> list[list[RefineBatchTask]]:
+    return [tasks[start : start + batch_size] for start in range(0, len(tasks), batch_size)]
+
+
+def _remaining_tasks(batches: Sequence[Sequence[RefineBatchTask]], batch_index: int) -> list[RefineBatchTask]:
+    return [task for batch in batches[batch_index + 1 :] for task in batch]
+
+
+def _estimate_task_frame_count(task: RefineBatchTask) -> int | None:
+    if str(task.input_path).lower() == "mock":
+        return int(task.mock_frames)
+    path = Path(task.input_path).expanduser()
+    if not path.exists() or not path.is_file():
+        return None
+    suffix = path.suffix.lower()
+    try:
+        if suffix == ".npz":
+            with np.load(path, allow_pickle=False) as data:
+                frames = _npz_frame_count(data)
+                fps = _first_float(task.fps, _npz_scalar_float(data, FPS_KEYS))
+        elif suffix == ".npy":
+            array = np.load(path, mmap_mode="r", allow_pickle=False)
+            frames = int(array.shape[0]) if array.ndim >= 1 else None
+            fps = task.fps
+        else:
+            return None
+    except Exception:
+        return None
+    return _resampled_frame_count(frames, source_fps=fps, target_fps=task.target_fps)
+
+
+def _npz_frame_count(data) -> int | None:
+    for key in FRAME_COUNT_KEYS:
+        if key in data.files:
+            shape = _npz_array_shape(data, key)
+            if shape and len(shape) >= 1 and int(shape[0]) > 0:
+                return int(shape[0])
+
+    candidates: list[int] = []
+    for key in data.files:
+        if key in NON_FRAME_KEYS or key.startswith("vertices"):
+            continue
+        shape = _npz_array_shape(data, key)
+        if shape and len(shape) >= 2 and int(shape[0]) > 1:
+            candidates.append(int(shape[0]))
+    return max(candidates) if candidates else None
+
+
+def _npz_array_shape(data, key: str) -> tuple[int, ...] | None:
+    member = f"{key}.npy"
+    try:
+        with data.zip.open(member) as file:
+            version = np.lib.format.read_magic(file)
+            shape, _, _ = np.lib.format._read_array_header(file, version)
+        return tuple(int(value) for value in shape)
+    except Exception:
+        try:
+            return tuple(int(value) for value in data[key].shape)
+        except Exception:
+            return None
+
+
+def _npz_scalar_float(data, keys: Sequence[str]) -> float | None:
+    for key in keys:
+        if key not in data.files:
+            continue
+        try:
+            value = np.asarray(data[key]).reshape(-1)[0]
+            parsed = float(value)
+        except Exception:
+            continue
+        if np.isfinite(parsed) and parsed > 0.0:
+            return parsed
+    return None
+
+
+def _resampled_frame_count(frames: int | None, *, source_fps: float | None, target_fps: float | None) -> int | None:
+    if frames is None or frames <= 0:
+        return None
+    source = _first_float(source_fps)
+    target = _first_float(target_fps)
+    if source is None or target is None:
+        return int(frames)
+    duration = max(int(frames) - 1, 0) / source
+    return max(1, int(round(duration * target)) + 1)
+
+
+def _first_float(*values: Any) -> float | None:
+    for value in values:
+        if value is None:
+            continue
+        try:
+            parsed = float(value)
+        except Exception:
+            continue
+        if np.isfinite(parsed) and parsed > 0.0:
+            return parsed
+    return None
 
 
 def _prepare_refine_item(

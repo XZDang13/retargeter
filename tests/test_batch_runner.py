@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 
 from retargeter.batch.manifest import BatchItemRecord, BatchManifest, save_manifest, write_summary_csv
-from retargeter.batch.native import NativeBatchRefineRunner
+from retargeter.batch.native import NativeBatchRefineRunner, _estimate_task_frame_count, _length_bucketed_task_batches
 from retargeter.batch.runner import BatchRefineRunner, build_refine_batch_tasks
 from retargeter.batch.worker import RefineBatchTask
 
@@ -237,6 +237,63 @@ def test_native_batch_refine_runner_chunks_items_and_updates_manifest(tmp_path: 
     assert [item.status for item in manifest.items] == ["success", "success", "success"]
     payload = json.loads((tmp_path / "out" / "batch_manifest.json").read_text(encoding="utf-8"))
     assert payload["success_count"] == 3
+
+
+def test_length_bucketed_native_batches_use_estimated_resampled_frame_count(tmp_path: Path):
+    input_dir = tmp_path / "inputs"
+    input_dir.mkdir()
+    long = input_dir / "long.npz"
+    short = input_dir / "short.npz"
+    mid = input_dir / "mid.npz"
+    short2 = input_dir / "short2.npz"
+    np.savez_compressed(long, trans=np.zeros((240, 3)), fps=np.asarray(120.0))
+    np.savez_compressed(short, trans=np.zeros((60, 3)), fps=np.asarray(30.0))
+    np.savez_compressed(mid, poses=np.zeros((150, 72)), mocap_frame_rate=np.asarray(50.0))
+    np.savez_compressed(short2, transl=np.zeros((20, 3)), fps=np.asarray(10.0))
+
+    tasks = build_refine_batch_tasks([long, short, mid, short2], tmp_path / "out", target_fps=50)
+
+    assert [_estimate_task_frame_count(task) for task in tasks] == [101, 99, 150, 96]
+    batches = _length_bucketed_task_batches(tasks, batch_size=2)
+
+    assert [[Path(task.input_path).name for task in batch] for batch in batches] == [
+        ["short2.npz", "short.npz"],
+        ["long.npz", "mid.npz"],
+    ]
+
+
+def test_native_batch_refine_runner_defaults_to_length_bucketed_chunks(tmp_path: Path, monkeypatch):
+    calls: list[list[str]] = []
+
+    def fake_process_chunk(self, chunk, *, progress):
+        calls.append([Path(task.input_path).name for task in chunk])
+        return [
+            BatchItemRecord(
+                input=str(task.input_path),
+                output_dir=str(task.output_dir),
+                status="success",
+                frame_count=2,
+                fps=50.0,
+                runtime_sec=0.01,
+                quality_valid=True,
+            )
+            for task in chunk
+        ]
+
+    monkeypatch.setattr(NativeBatchRefineRunner, "_process_chunk", fake_process_chunk)
+    input_dir = tmp_path / "inputs"
+    input_dir.mkdir()
+    paths = [input_dir / name for name in ("long.npz", "short.npz", "mid.npz")]
+    np.savez_compressed(paths[0], trans=np.zeros((300, 3)), fps=np.asarray(50.0))
+    np.savez_compressed(paths[1], trans=np.zeros((20, 3)), fps=np.asarray(50.0))
+    np.savez_compressed(paths[2], trans=np.zeros((120, 3)), fps=np.asarray(50.0))
+    tasks = build_refine_batch_tasks(paths, tmp_path / "out", target_fps=50)
+
+    manifest = NativeBatchRefineRunner(manifest_path=tmp_path / "out" / "batch_manifest.json").run(tasks, batch_size=2)
+
+    assert calls == [["short.npz", "mid.npz"], ["long.npz"]]
+    assert [item.input for item in manifest.items] == [str(path) for path in paths]
+    assert [item.status for item in manifest.items] == ["success", "success", "success"]
 
 
 def test_native_batch_refine_runner_parallel_preprocess_feeds_native_batches(tmp_path: Path, monkeypatch):
