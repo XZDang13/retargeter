@@ -10,6 +10,7 @@ import torch
 
 from retargeter.newton import RobotSpec, RetargetedMotion, TorchRobotFK
 from retargeter.preprocess import PreprocessResult
+from retargeter.progress import ProgressReporter, get_progress
 
 from .losses import total_refinement_loss
 
@@ -85,12 +86,14 @@ class TorchMotionRefiner:
         torch_fk: TorchRobotFK,
         config: Mapping[str, Any] | None = None,
         log_fn: Callable[[dict[str, float | int | str]], None] | None = None,
+        progress: ProgressReporter | None = None,
     ):
         self.robot_spec = robot_spec
         self.torch_fk = torch_fk
         self.config = copy.deepcopy(dict(config or {}))
         self.refiner_config = _refiner_config(self.config)
         self.log_fn = log_fn
+        self.progress = get_progress(progress)
         self.device = _torch_device(self.refiner_config["device"], torch_fk)
         self.dtype = _torch_dtype(str(self.refiner_config["dtype"]))
 
@@ -145,13 +148,16 @@ class TorchMotionRefiner:
             initial_loss, initial_metrics, _ = evaluate()
         _record_loss(loss_curve, 0, "adam", initial_loss, initial_metrics, self.log_fn)
 
-        for iteration in range(1, iterations + 1):
-            optimizer.zero_grad()
-            loss, metrics, _ = evaluate()
-            loss.backward()
-            optimizer.step()
-            if _should_log(iteration, iterations, log_interval):
-                _record_loss(loss_curve, iteration, "adam", loss, metrics, self.log_fn)
+        with self.progress.bar(total=iterations, desc="Refine Adam", unit="iter") as bar:
+            for iteration in range(1, iterations + 1):
+                optimizer.zero_grad()
+                loss, metrics, _ = evaluate()
+                loss.backward()
+                optimizer.step()
+                if _should_log(iteration, iterations, log_interval):
+                    _record_loss(loss_curve, iteration, "adam", loss, metrics, self.log_fn)
+                    bar.set_postfix({"loss": f"{float(loss.detach().cpu()):.4g}"}, refresh=False)
+                bar.update(1)
 
         if bool(self.refiner_config["lbfgs_enabled"]):
             lbfgs = torch.optim.LBFGS(
@@ -167,7 +173,9 @@ class TorchMotionRefiner:
                 closure_loss.backward()
                 return closure_loss
 
-            lbfgs.step(closure)
+            with self.progress.bar(total=1, desc="Refine LBFGS", unit="phase") as bar:
+                lbfgs.step(closure)
+                bar.update(1)
             with torch.no_grad():
                 lbfgs_loss, lbfgs_metrics, _ = evaluate()
             _record_loss(loss_curve, iterations, "lbfgs", lbfgs_loss, lbfgs_metrics, self.log_fn)
@@ -229,8 +237,9 @@ def run_refinement(
     torch_fk: TorchRobotFK,
     config: Mapping[str, Any] | None = None,
     log_fn: Callable[[dict[str, float | int | str]], None] | None = None,
+    progress: ProgressReporter | None = None,
 ) -> RefinedMotion:
-    return TorchMotionRefiner(robot_spec, torch_fk, config=config, log_fn=log_fn).refine(retargeted, preprocess_result)
+    return TorchMotionRefiner(robot_spec, torch_fk, config=config, log_fn=log_fn, progress=progress).refine(retargeted, preprocess_result)
 
 def _validate_inputs(retargeted: RetargetedMotion, preprocess_result: PreprocessResult, robot_spec: RobotSpec) -> None:
     retargeted.validate()

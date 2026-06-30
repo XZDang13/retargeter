@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from retargeter.preprocess import CanonicalHumanMotion, FootContactResult
+from retargeter.progress import ProgressReporter, get_progress
 
 from .ik_retarget_solver import IKRetargetFrameResult, NewtonIKRetargetSolver
 
@@ -60,19 +61,23 @@ class SequenceIKRetargetRunner:
         motion: CanonicalHumanMotion,
         *,
         contact_result: FootContactResult | None = None,
+        progress: ProgressReporter | None = None,
     ) -> RetargetedMotion:
         motion.validate()
+        reporter = get_progress(progress)
         frame_results: list[IKRetargetFrameResult] = []
         previous: IKRetargetFrameResult | None = None
-        for frame_idx in range(motion.num_frames()):
-            result = self.solver.solve_frame(
-                motion,
-                frame_idx,
-                contact_result=contact_result,
-                previous_result=previous,
-            )
-            frame_results.append(result)
-            previous = result
+        with reporter.bar(total=motion.num_frames(), desc="IK retarget", unit="frame") as bar:
+            for frame_idx in range(motion.num_frames()):
+                result = self.solver.solve_frame(
+                    motion,
+                    frame_idx,
+                    contact_result=contact_result,
+                    previous_result=previous,
+                )
+                frame_results.append(result)
+                previous = result
+                bar.update(1)
         return retargeted_motion_from_frames(frame_results, fps=float(motion.fps), metadata={"source_frames": motion.num_frames()})
 
 

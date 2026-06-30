@@ -85,8 +85,6 @@ def summarize(manifest: BatchManifest) -> dict[str, int]:
     for item in manifest.items:
         counts[item.status] = counts.get(item.status, 0) + 1
     blocking_failure_count = counts.get("failed", 0)
-    if not manifest.allow_invalid:
-        blocking_failure_count += counts.get("invalid", 0)
     summary = dict(counts)
     summary.update(
         {

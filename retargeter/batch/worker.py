@@ -9,6 +9,8 @@ from typing import Any, Callable
 
 import numpy as np
 
+from retargeter.progress import ProgressReporter
+
 from .manifest import BatchItemRecord
 
 
@@ -27,6 +29,7 @@ class RefineBatchTask:
     mock_frames: int = 120
     return_vertices: bool = True
     export_human: bool = True
+    export_retargeted: bool = False
     allow_invalid: bool = False
     preprocess_config: Path | None = None
     scaler_config: Path | None = None
@@ -42,12 +45,18 @@ def process_refine_batch_task(task: RefineBatchTask) -> BatchItemRecord:
     return _process_refine_batch_task(task)
 
 
-def make_refine_task_processor(*, backend_factory=None, refinement_fk_factory=None) -> TaskProcessor:
+def make_refine_task_processor(
+    *,
+    backend_factory=None,
+    refinement_fk_factory=None,
+    progress: ProgressReporter | None = None,
+) -> TaskProcessor:
     def _processor(task: RefineBatchTask) -> BatchItemRecord:
         return _process_refine_batch_task(
             task,
             backend_factory=backend_factory,
             refinement_fk_factory=refinement_fk_factory,
+            progress=progress,
         )
 
     return _processor
@@ -58,6 +67,7 @@ def _process_refine_batch_task(
     *,
     backend_factory=None,
     refinement_fk_factory=None,
+    progress: ProgressReporter | None = None,
 ) -> BatchItemRecord:
     start = time.perf_counter()
     try:
@@ -84,8 +94,10 @@ def _process_refine_batch_task(
             mock_frames=task.mock_frames,
             return_vertices=task.return_vertices,
             export_human=task.export_human,
+            export_retargeted=task.export_retargeted,
             refinement_config=_refinement_config_for_task(task),
             allow_invalid=task.allow_invalid,
+            progress=progress,
         )
         runtime = time.perf_counter() - start
         valid = bool(result.quality_report.valid)
@@ -99,8 +111,8 @@ def _process_refine_batch_task(
             quality_valid=valid,
             quality_summary=_quality_summary_from_report(result.quality_report),
             paths={key: str(value) for key, value in result.paths.items()},
-            error_type=None if valid or task.allow_invalid else "RefinementQualityReport",
-            error=None if valid or task.allow_invalid else "; ".join(result.quality_report.failures),
+            error_type=None,
+            error=None,
         )
     except Exception as exc:
         runtime = time.perf_counter() - start

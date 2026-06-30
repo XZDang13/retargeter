@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import Any, Protocol
 
 import numpy as np
 
@@ -86,6 +86,13 @@ class IKBackend(Protocol):
 
     def forward_kinematics(self, state: IKState) -> RobotBodyState:
         ...
+
+
+@dataclass(frozen=True)
+class _NativeObjectiveBinding:
+    descriptor_index: int
+    kind: str
+    native: Any
 
 
 class NewtonBackend:
@@ -182,6 +189,14 @@ class NewtonBackend:
                 diagnostics=diagnostics,
             )
 
+    def create_reusable_solver(
+        self,
+        objectives: list[IKObjectiveDescriptor],
+        settings: NewtonSolveSettings,
+    ) -> "ReusableNewtonIKSolver":
+        """Create a reusable single-problem Newton IK solver for stable objective layouts."""
+        return ReusableNewtonIKSolver(self, objectives, settings)
+
     def forward_kinematics(self, state: IKState) -> RobotBodyState:
         self._ensure_loaded()
         assert self._newton is not None and self._wp is not None and self._model is not None
@@ -263,9 +278,17 @@ class NewtonBackend:
             raise RuntimeError(f"Newton model is missing robot spec bodies: {missing}.")
 
     def _build_native_objectives(self, objectives: list[IKObjectiveDescriptor]):
+        native, _ = self._build_bound_native_objectives(objectives)
+        return native
+
+    def _build_bound_native_objectives(
+        self,
+        objectives: list[IKObjectiveDescriptor],
+    ) -> tuple[list[Any], list[_NativeObjectiveBinding]]:
         assert self._newton is not None and self._wp is not None and self._model is not None
         native = []
-        for objective in objectives:
+        bindings: list[_NativeObjectiveBinding] = []
+        for descriptor_index, objective in enumerate(objectives):
             if objective.kind == "position":
                 body_index = self._body_name_to_newton_index[objective.body_name or ""]
                 local_pos = (
@@ -274,34 +297,34 @@ class NewtonBackend:
                     else np.asarray(objective.body_local_pos, dtype=np.float64)
                 )
                 target = self._wp.array(np.asarray([objective.target], dtype=np.float32), dtype=self._wp.vec3)
-                native.append(
-                    self._newton.ik.IKObjectivePosition(
-                        body_index,
-                        self._wp.vec3(float(local_pos[0]), float(local_pos[1]), float(local_pos[2])),
-                        target,
-                        weight=float(objective.weight),
-                    )
+                native_objective = self._newton.ik.IKObjectivePosition(
+                    body_index,
+                    self._wp.vec3(float(local_pos[0]), float(local_pos[1]), float(local_pos[2])),
+                    target,
+                    weight=float(objective.weight),
                 )
+                native.append(native_objective)
+                bindings.append(_NativeObjectiveBinding(descriptor_index, objective.kind, native_objective))
             elif objective.kind == "rotation":
                 body_index = self._body_name_to_newton_index[objective.body_name or ""]
                 target = self._wp.array(np.asarray([objective.target], dtype=np.float32), dtype=self._wp.vec4)
-                native.append(
-                    self._newton.ik.IKObjectiveRotation(
-                        body_index,
-                        self._wp.quat(0.0, 0.0, 0.0, 1.0),
-                        target,
-                        weight=float(objective.weight),
-                    )
+                native_objective = self._newton.ik.IKObjectiveRotation(
+                    body_index,
+                    self._wp.quat(0.0, 0.0, 0.0, 1.0),
+                    target,
+                    weight=float(objective.weight),
                 )
+                native.append(native_objective)
+                bindings.append(_NativeObjectiveBinding(descriptor_index, objective.kind, native_objective))
             elif objective.kind == "joint_limit":
-                native.append(
-                    self._newton.ik.IKObjectiveJointLimit(
-                        self._model.joint_limit_lower,
-                        self._model.joint_limit_upper,
-                        weight=float(objective.weight),
-                    )
+                native_objective = self._newton.ik.IKObjectiveJointLimit(
+                    self._model.joint_limit_lower,
+                    self._model.joint_limit_upper,
+                    weight=float(objective.weight),
                 )
-        return native
+                native.append(native_objective)
+                bindings.append(_NativeObjectiveBinding(descriptor_index, objective.kind, native_objective))
+        return native, bindings
 
     def _apply_seed_bias(self, seed_state: IKState, objectives: list[IKObjectiveDescriptor]) -> IKState:
         q = np.asarray(seed_state.joint_pos, dtype=np.float64).copy()
@@ -353,6 +376,153 @@ class NewtonBackend:
             root_quat_xyzw=normalize_quat_xyzw(root_quat).copy(),
             joint_pos=joint_pos.copy(),
         )
+
+
+class ReusableNewtonIKSolver:
+    """Reusable single-problem Newton IK solver for a stable native objective layout."""
+
+    def __init__(
+        self,
+        backend: NewtonBackend,
+        objectives: list[IKObjectiveDescriptor],
+        settings: NewtonSolveSettings,
+    ):
+        backend._ensure_loaded()
+        assert backend._newton is not None and backend._wp is not None and backend._model is not None
+        for objective in objectives:
+            objective.validate(backend.robot_spec)
+
+        self._backend = backend
+        self._settings_key = _solver_reuse_settings_key(settings)
+        self._layout_key = _native_objective_layout_key(objectives)
+        self._native_objectives, self._bindings = backend._build_bound_native_objectives(objectives)
+        self._solver = None
+        if self._native_objectives:
+            self._solver = backend._newton.ik.IKSolver(
+                backend._model,
+                1,
+                self._native_objectives,
+                optimizer=settings.optimizer,
+                jacobian_mode=settings.jacobian_mode,
+                lambda_initial=settings.lambda_initial,
+            )
+
+    def compatible(
+        self,
+        objectives: list[IKObjectiveDescriptor],
+        settings: NewtonSolveSettings,
+    ) -> bool:
+        return (
+            self._settings_key == _solver_reuse_settings_key(settings)
+            and self._layout_key == _native_objective_layout_key(objectives)
+        )
+
+    def solve(
+        self,
+        seed_state: IKState,
+        objectives: list[IKObjectiveDescriptor],
+        settings: NewtonSolveSettings,
+    ) -> BackendSolveResult:
+        backend = self._backend
+        assert backend._wp is not None
+        seed_state.validate(backend.robot_spec)
+        for objective in objectives:
+            objective.validate(backend.robot_spec)
+        if not self.compatible(objectives, settings):
+            raise ValueError("ReusableNewtonIKSolver objective layout or solver settings changed.")
+
+        seed = backend._apply_seed_bias(seed_state, objectives)
+        diagnostics = {
+            "objective_count": len(objectives),
+            "native_objective_count": len(self._native_objectives),
+            "regularization_seed_bias": True,
+            "reused_solver": True,
+        }
+
+        if self._solver is None:
+            return BackendSolveResult(
+                state=seed,
+                success=True,
+                cost=0.0,
+                iterations=0,
+                diagnostics=diagnostics,
+            )
+
+        full_q = backend._state_to_full_q(seed)
+        joint_q_in = backend._wp.array(full_q[None, :].astype(np.float32), dtype=backend._wp.float32)
+        joint_q_out = backend._wp.array(full_q[None, :].astype(np.float32), dtype=backend._wp.float32)
+
+        try:
+            self._update_native_objectives(objectives)
+            self._solver.step(joint_q_in, joint_q_out, iterations=int(settings.iterations), step_size=float(settings.step_size))
+            solved_full_q = joint_q_out.numpy()[0].astype(np.float64)
+            state = backend._full_q_to_state(solved_full_q)
+            costs = self._solver.costs.numpy()
+            cost = float(np.min(costs)) if costs.size else None
+            return BackendSolveResult(
+                state=state,
+                success=True,
+                cost=cost,
+                iterations=int(settings.iterations),
+                diagnostics=diagnostics,
+            )
+        except Exception as exc:  # pragma: no cover - exercised only with real Newton failures.
+            diagnostics["error"] = f"{type(exc).__name__}: {exc}"
+            return BackendSolveResult(
+                state=seed,
+                success=False,
+                cost=None,
+                iterations=0,
+                diagnostics=diagnostics,
+            )
+
+    def _update_native_objectives(self, objectives: list[IKObjectiveDescriptor]) -> None:
+        wp = self._backend._wp
+        assert wp is not None
+        for binding in self._bindings:
+            objective = objectives[binding.descriptor_index]
+            binding.native.weight = float(objective.weight)
+            if binding.kind == "position":
+                target = np.asarray(objective.target, dtype=np.float64)
+                binding.native.set_target_position(0, wp.vec3(float(target[0]), float(target[1]), float(target[2])))
+            elif binding.kind == "rotation":
+                target = normalize_quat_xyzw(np.asarray(objective.target, dtype=np.float64))
+                binding.native.set_target_rotation(
+                    0,
+                    wp.quat(float(target[0]), float(target[1]), float(target[2]), float(target[3])),
+                )
+
+
+def _solver_reuse_settings_key(settings: NewtonSolveSettings) -> tuple[str, str, float]:
+    return (str(settings.optimizer), str(settings.jacobian_mode), float(settings.lambda_initial))
+
+
+def _native_objective_layout_key(objectives: list[IKObjectiveDescriptor]) -> tuple[tuple[Any, ...], ...]:
+    layout: list[tuple[Any, ...]] = []
+    for objective in objectives:
+        if objective.kind == "position":
+            layout.append(
+                (
+                    objective.kind,
+                    objective.body_name,
+                    objective.semantic_name,
+                    _float_tuple(objective.body_local_pos, 3),
+                )
+            )
+        elif objective.kind == "rotation":
+            layout.append((objective.kind, objective.body_name, objective.semantic_name))
+        elif objective.kind == "joint_limit":
+            layout.append((objective.kind,))
+    return tuple(layout)
+
+
+def _float_tuple(value: np.ndarray | None, size: int) -> tuple[float, ...] | None:
+    if value is None:
+        return None
+    arr = np.asarray(value, dtype=np.float64)
+    if arr.shape != (size,):
+        return None
+    return tuple(float(v) for v in arr)
 
 
 def _body_name_map_from_import_info(info) -> dict[str, int]:

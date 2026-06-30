@@ -12,8 +12,8 @@ from .human_to_robot_scaler import HumanToRobotScaler
 from .ik_targets import BodyIKTarget, IKTargetSet
 
 
-IK_PASS_NAMES = ("coarse_alignment", "full_body_tracking")
-IKPassName = Literal["coarse_alignment", "full_body_tracking"]
+IK_PASS_NAMES = ("full_body_tracking",)
+IKPassName = Literal["full_body_tracking"]
 
 
 class IKTargetBuilder:
@@ -26,6 +26,9 @@ class IKTargetBuilder:
         self.target_config_path = Path(target_config_path)
         self.target_config = _load_yaml(self.target_config_path)
         _validate_target_config(self.target_config, self.target_config_path)
+        self._scaled_motion_cache_key: tuple[int, int, float] | None = None
+        self._scaled_motion_cache_source: CanonicalHumanMotion | None = None
+        self._scaled_motion_cache: CanonicalHumanMotion | None = None
 
     def build(
         self,
@@ -38,7 +41,7 @@ class IKTargetBuilder:
         if frame_idx < 0 or frame_idx >= motion.num_frames():
             raise IndexError(f"frame_idx {frame_idx} is outside motion length {motion.num_frames()}.")
 
-        scaled_motion = self.scaler.scale_motion(motion)
+        scaled_motion = self._scale_motion_cached(motion)
         pass_weights = self.target_config[pass_name]
         targets: list[BodyIKTarget] = []
         modulation = self.target_config.get("contact_weight_modulation", {})
@@ -53,6 +56,7 @@ class IKTargetBuilder:
             pos_weight = float(weights.get("pos_weight", 0.0))
             rot_weight = float(weights.get("rot_weight", 0.0))
             confidence = 1.0
+            can_activate_position = _contact_can_activate_position(modulation, semantic_name, contact_result)
             position_source_metadata: dict[str, Any] = {"type": "body", "body": human_body_name}
             rotation_source_metadata: dict[str, Any] = {"type": "body", "body": human_body_name}
 
@@ -68,7 +72,7 @@ class IKTargetBuilder:
                         rot_weight += score * float(entry.get("extra_rot_weight", 0.0))
 
             target_pos_w = None
-            if pos_weight > 0.0:
+            if pos_weight > 0.0 or can_activate_position:
                 target_pos_w, position_source_metadata = self._target_position_w(
                     motion,
                     scaled_motion,
@@ -103,6 +107,7 @@ class IKTargetBuilder:
                     "target_config_path": str(self.target_config_path),
                     "position_source": position_source_metadata,
                     "rotation_source": rotation_source_metadata,
+                    "can_activate_position": bool(can_activate_position),
                 },
             )
             targets.append(target)
@@ -120,6 +125,20 @@ class IKTargetBuilder:
         )
         target_set.validate()
         return target_set
+
+    def _scale_motion_cached(self, motion: CanonicalHumanMotion) -> CanonicalHumanMotion:
+        cache_key = (id(motion), motion.num_frames(), float(motion.fps))
+        if (
+            self._scaled_motion_cache_key == cache_key
+            and self._scaled_motion_cache_source is motion
+            and self._scaled_motion_cache is not None
+        ):
+            return self._scaled_motion_cache
+        scaled_motion = self.scaler.scale_motion(motion)
+        self._scaled_motion_cache_key = cache_key
+        self._scaled_motion_cache_source = motion
+        self._scaled_motion_cache = scaled_motion
+        return scaled_motion
 
     def required_robot_body_names(self, pass_name: IKPassName | None = None) -> list[str]:
         if pass_name is None:
@@ -238,6 +257,24 @@ def _contact_score(contact_result: FootContactResult, region: str, frame_idx: in
     if not np.isfinite(scores[frame_idx]):
         return 0.0
     return float(np.clip(scores[frame_idx], 0.0, 1.0))
+
+
+def _contact_can_activate_position(
+    modulation: dict[str, Any],
+    semantic_name: str,
+    contact_result: FootContactResult | None,
+) -> bool:
+    if contact_result is None or not modulation.get("enabled", False):
+        return False
+    for region, entry in modulation.get("regions", {}).items():
+        if entry.get("target") != semantic_name:
+            continue
+        if float(entry.get("extra_pos_weight", 0.0)) <= 0.0:
+            continue
+        source_region = str(entry.get("source_region", region))
+        if source_region in contact_result.contact_score:
+            return True
+    return False
 
 
 def _optional_vec3(value, *, field_name: str) -> np.ndarray | None:

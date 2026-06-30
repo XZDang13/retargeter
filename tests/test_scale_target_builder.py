@@ -16,13 +16,13 @@ G1_29_TARGETS = Path("retargeter/scale/configs/g1_29_ik_targets.yaml")
 G1_23_TARGETS = Path("retargeter/scale/configs/g1_23_ik_targets.yaml")
 
 
-def test_g1_29_coarse_alignment_builder_returns_expected_targets():
+def test_g1_29_full_body_tracking_builder_returns_expected_targets():
     motion = make_canonical_motion(num_frames=5)
     builder = IKTargetBuilder(G1_29_SCALER, G1_29_TARGETS)
 
-    target_set = builder.build(motion, frame_idx=2, pass_name="coarse_alignment")
+    target_set = builder.build(motion, frame_idx=2, pass_name="full_body_tracking")
 
-    assert target_set.pass_name == "coarse_alignment"
+    assert target_set.pass_name == "full_body_tracking"
     assert [target.semantic_name for target in target_set.targets] == [
         "pelvis",
         "left_hip",
@@ -54,11 +54,12 @@ def test_g1_29_coarse_alignment_builder_returns_expected_targets():
 
 def test_gmr_style_hands_and_phuma_soma_style_shoulders_for_both_g1_variants():
     motion = make_canonical_motion(num_frames=3)
-    target_29 = IKTargetBuilder(G1_29_SCALER, G1_29_TARGETS).build(motion, 0, "coarse_alignment")
-    target_23 = IKTargetBuilder(G1_23_SCALER, G1_23_TARGETS).build(motion, 0, "coarse_alignment")
+    target_29 = IKTargetBuilder(G1_29_SCALER, G1_29_TARGETS).build(motion, 0, "full_body_tracking")
+    target_23 = IKTargetBuilder(G1_23_SCALER, G1_23_TARGETS).build(motion, 0, "full_body_tracking")
 
-    assert target_29.get_target("left_hand").rot_weight == 10.0
-    assert target_29.get_target("left_hand").target_pos_w is None
+    assert target_29.get_target("left_hand").pos_weight == 10.0
+    assert target_29.get_target("left_hand").rot_weight == 5.0
+    assert target_29.get_target("left_hand").target_pos_w.shape == (3,)
     assert target_29.get_target("left_hand").target_quat_xyzw.shape == (4,)
     assert target_23.get_target("left_hand").robot_body_name == "left_rubber_hand_link"
     assert target_23.get_target("right_hand").robot_body_name == "right_rubber_hand_link"
@@ -117,7 +118,6 @@ def test_default_scaler_configs_do_not_use_mesh_sole_sources():
 def test_stage_required_robot_bodies_exclude_non_target_head_link():
     builder = IKTargetBuilder(G1_29_SCALER, G1_29_TARGETS)
 
-    assert "head_link" not in builder.required_robot_body_names("coarse_alignment")
     assert "head_link" not in builder.required_robot_body_names("full_body_tracking")
 
 
@@ -135,12 +135,12 @@ def test_contact_scores_increase_stance_foot_weights():
     )
     builder = IKTargetBuilder(G1_29_SCALER, G1_29_TARGETS)
 
-    target_set = builder.build(motion, frame_idx=1, pass_name="coarse_alignment", contact_result=contact)
+    target_set = builder.build(motion, frame_idx=1, pass_name="full_body_tracking", contact_result=contact)
 
-    assert target_set.get_target("left_foot").pos_weight == 95.0
-    assert target_set.get_target("left_foot").rot_weight == 2.0
+    assert target_set.get_target("left_foot").pos_weight == 115.0
+    assert target_set.get_target("left_foot").rot_weight == 5.0
     assert target_set.get_target("left_foot").confidence == 0.75
-    assert target_set.get_target("right_foot").pos_weight == 85.0
+    assert target_set.get_target("right_foot").pos_weight == 105.0
     assert target_set.get_target("left_ankle").pos_weight == 50.0
     assert target_set.get_target("left_ankle").confidence == 1.0
 
@@ -171,7 +171,8 @@ def test_contact_scores_activate_position_only_toe_heel_keypoints():
     assert target_set.get_target("left_heel").pos_weight == 25.0
     assert target_set.get_target("right_toe").pos_weight == 12.5
     assert target_set.get_target("right_heel").pos_weight == 0.0
-    assert target_set.get_target("right_heel").target_pos_w is None
+    assert target_set.get_target("right_heel").target_pos_w.shape == (3,)
+    assert target_set.get_target("right_heel").metadata["can_activate_position"] is True
     assert target_set.get_target("left_foot").pos_weight == 100.0
     assert target_set.get_target("left_foot").confidence == 1.0
 

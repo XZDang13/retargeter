@@ -45,14 +45,11 @@ def plot_foot_height_and_speed(preprocess_result: PreprocessResult, output_path:
 
 def plot_ik_errors(retargeted_motion: RetargetedMotion, output_path: Path | str) -> Path:
     retargeted_motion.validate()
-    coarse_cost = _diagnostic_series(retargeted_motion, ("coarse_alignment", "cost"))
     tracking_cost = _diagnostic_series(retargeted_motion, ("full_body_tracking", "cost"))
     fig, ax = plt.subplots(figsize=(10, 4), dpi=120)
-    if coarse_cost is not None:
-        ax.plot(coarse_cost, label="coarse alignment cost")
     if tracking_cost is not None:
         ax.plot(tracking_cost, label="full body tracking cost")
-    if coarse_cost is None and tracking_cost is None:
+    if tracking_cost is None:
         ax.plot(np.zeros(retargeted_motion.num_frames()), label="no cost diagnostics")
     ax.set_title("IK diagnostics")
     ax.set_xlabel("frame")

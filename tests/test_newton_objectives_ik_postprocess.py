@@ -19,7 +19,7 @@ G1_29_TARGETS = Path("retargeter/scale/configs/g1_29_ik_targets.yaml")
 def test_build_target_objectives_preserves_target_weights_and_confidence():
     spec = RobotSpec.from_yaml(G1_29_ROBOT)
     motion = make_canonical_motion(num_frames=3)
-    target_set = IKTargetBuilder(G1_29_SCALER, G1_29_TARGETS).build(motion, 1, "coarse_alignment")
+    target_set = IKTargetBuilder(G1_29_SCALER, G1_29_TARGETS).build(motion, 1, "full_body_tracking")
 
     descriptors = build_target_objectives(target_set, spec)
 
@@ -59,7 +59,7 @@ def test_local_foot_target_objective_preserves_body_local_point():
 def test_target_objectives_raise_for_missing_robot_body():
     spec = RobotSpec.from_yaml(G1_29_ROBOT)
     target_set = IKTargetSet(
-        pass_name="coarse_alignment",
+        pass_name="full_body_tracking",
         targets=[
             BodyIKTarget(
                 semantic_name="bad",

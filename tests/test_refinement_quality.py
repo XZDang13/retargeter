@@ -154,12 +154,51 @@ def test_refinement_quality_physical_filter_fails_joint_velocity_acceleration_an
 
     retargeted = _make_retargeted(spec)
     spiky = _make_refined(retargeted)
-    spiky.joint_pos[:, 0] = np.asarray([0.0, 0.0, 0.5, 0.0, 0.0, 0.0], dtype=np.float64)
+    spiky.joint_pos[:, 0] = np.asarray([0.0, 0.0, 1.0, 0.0, 0.0, 0.0], dtype=np.float64)
     spiky_report = evaluate_refinement_quality(retargeted, spiky, spec, config=_loose_quality_config())
 
     assert spiky_report.valid is False
     assert "joint_acceleration_violation" in spiky_report.failures
     assert "joint_jerk_violation" in spiky_report.failures
+
+
+def test_refinement_quality_physical_filter_uses_robust_dynamics_gate():
+    spec = _make_robot_spec()
+    retargeted = _make_retargeted(spec, frames=500)
+    retargeted.fps = 50.0
+    refined = _make_refined(retargeted)
+    refined.fps = 50.0
+    refined.joint_pos[250, 0] = 0.20
+
+    report = evaluate_refinement_quality(retargeted, refined, spec)
+
+    assert report.valid is True
+    assert report.metrics["joint_acceleration_max_rad_s2"] > report.thresholds["max_joint_acceleration_rad_s2"]
+    assert report.metrics["joint_jerk_max_rad_s3"] > report.thresholds["max_joint_jerk_rad_s3"]
+    assert report.metrics["joint_acceleration_gate_rad_s2"] <= report.thresholds["max_joint_acceleration_rad_s2"]
+    assert report.metrics["joint_jerk_gate_rad_s3"] <= report.thresholds["max_joint_jerk_rad_s3"]
+    assert report.metrics["joint_jerk_violation_max_duration_s"] < report.thresholds["max_joint_dynamics_violation_duration_s"]
+    assert report.metrics["joint_dynamics_gate_percentile"] == pytest.approx(99.5)
+
+
+def test_refinement_quality_physical_filter_rejects_sustained_dynamics_violation_at_50hz():
+    spec = _make_robot_spec()
+    retargeted = _make_retargeted(spec, frames=200)
+    retargeted.fps = 50.0
+    refined = _make_refined(retargeted)
+    refined.fps = 50.0
+    refined.joint_pos[80:100, 0] = 0.20 * ((np.arange(20) % 2) * 2 - 1)
+
+    report = evaluate_refinement_quality(retargeted, refined, spec)
+
+    assert report.valid is False
+    assert "joint_acceleration_violation" in report.failures
+    assert "joint_jerk_violation" in report.failures
+    assert (
+        report.metrics["joint_acceleration_violation_max_duration_s"]
+        > report.thresholds["max_joint_dynamics_violation_duration_s"]
+    )
+    assert report.metrics["joint_jerk_violation_max_duration_s"] > report.thresholds["max_joint_dynamics_violation_duration_s"]
 
 
 def test_refinement_quality_physical_filter_fails_absolute_foot_penetration_without_worsening():

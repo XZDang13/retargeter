@@ -43,6 +43,23 @@ def test_manifest_round_trip_update_summary_and_csv(tmp_path: Path):
     assert "a,out/a,success,3,30.0" in lines[1]
 
 
+def test_manifest_summary_counts_invalid_as_rejected_not_failed():
+    manifest = BatchManifest(
+        robot="unitree_g1_29",
+        items=[
+            BatchItemRecord(input="a", output_dir="out/a", status="invalid", quality_valid=False),
+            BatchItemRecord(input="b", output_dir="out/b", status="success", quality_valid=True),
+        ],
+    )
+
+    summary = summarize(manifest)
+
+    assert summary["invalid"] == 1
+    assert summary["success_count"] == 1
+    assert summary["failure_count"] == 0
+    assert summary["blocking_failure_count"] == 0
+
+
 def test_gpu_pool_parsing_and_assignment():
     assert parse_gpu_ids(None) == []
     assert parse_gpu_ids("") == []

@@ -31,6 +31,7 @@ from retargeter.preprocess import (
     load_preprocess_config,
     run_smpl_preprocess,
 )
+from retargeter.progress import ProgressReporter, get_progress
 from retargeter.scale import IKTargetSet, IKTargetBuilder
 from retargeter.refinement import (
     RefinedMotion,
@@ -179,13 +180,12 @@ class OnlineRetargeter:
 
     def step_targets(
         self,
-        coarse_targets: IKTargetSet,
         tracking_targets: IKTargetSet,
         *,
         fps: float,
         frame_idx: int | None = None,
     ) -> IKRetargetFrameResult:
-        return self.runner.step_targets(coarse_targets, tracking_targets, fps=fps, frame_idx=frame_idx)
+        return self.runner.step_targets(tracking_targets, fps=fps, frame_idx=frame_idx)
 
     def run_motion(
         self,
@@ -241,12 +241,16 @@ class RefinePipeline:
         mock_frames: int = 120,
         return_vertices: bool = True,
         export_human: bool = True,
+        export_retargeted: bool = False,
         refinement_config: Mapping[str, Any] | None = None,
         allow_invalid: bool = False,
+        progress: ProgressReporter | None = None,
     ) -> RefinePipelineResult:
+        reporter = get_progress(progress)
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         preprocess_config = load_preprocess_config(self.config_paths.preprocess_config)
+        reporter.stage(f"Preprocess {input_path}")
         canonical_motion, preprocess_result, source_metadata = load_pipeline_input(
             input_path,
             preprocess_config,
@@ -262,6 +266,7 @@ class RefinePipeline:
 
         human_path: Path | None = None
         if export_human and preprocess_result.motion.vertices_w is not None:
+            reporter.stage("Export human mesh")
             human_path = export_canonical_human_motion_npz(
                 preprocess_result.motion,
                 output_dir / "human.npz",
@@ -274,7 +279,12 @@ class RefinePipeline:
         backend = self.backend_factory(robot_spec) if self.backend_factory is not None else None
         solver = NewtonIKRetargetSolver(self.config_paths.newton_config, backend=backend, target_builder=target_builder)
         validate_robot_choices(self.robot, target_builder, solver)
-        retargeted_motion = SequenceIKRetargetRunner(solver).run(preprocess_result.motion, contact_result=preprocess_result.contact)
+        reporter.stage("IK retarget")
+        retargeted_motion = SequenceIKRetargetRunner(solver).run(
+            preprocess_result.motion,
+            contact_result=preprocess_result.contact,
+            progress=reporter,
+        )
         retargeted_motion.metadata.update(
             _retargeted_metadata(
                 source_metadata=source_metadata,
@@ -287,7 +297,9 @@ class RefinePipeline:
 
         refinement_cfg = copy.deepcopy(dict(refinement_config or {}))
         torch_fk = self.refinement_fk_factory(robot_spec) if self.refinement_fk_factory is not None else TorchRobotFK(robot_spec)
-        final_motion = run_refinement(retargeted_motion, preprocess_result, robot_spec, torch_fk, config=refinement_cfg)
+        reporter.stage("Refinement")
+        final_motion = run_refinement(retargeted_motion, preprocess_result, robot_spec, torch_fk, config=refinement_cfg, progress=reporter)
+        reporter.stage("Quality evaluation")
         quality_report = evaluate_refinement_quality(
             retargeted_motion,
             final_motion,
@@ -298,30 +310,44 @@ class RefinePipeline:
         final_motion.metadata.update(
             {
                 "pipeline": "refine",
-                "retargeted_motion_path": "retargeted_motion.npz",
+                "retargeted_motion_path": "retargeted_motion.npz" if export_retargeted else None,
+                "retargeted_motion_exported": bool(export_retargeted),
                 "refinement_config": copy.deepcopy(refinement_cfg),
                 "refinement_quality_valid": bool(quality_report.valid),
-                "training_motion": True,
+                "rejected": bool((not quality_report.valid) and not allow_invalid),
+                "training_motion": bool(quality_report.valid),
             }
         )
+        final_output_dir = output_dir if quality_report.valid or allow_invalid else output_dir / "rejected"
 
         paths = {
-            "retargeted_motion": output_dir / "retargeted_motion.npz",
-            "retargeted_metadata": output_dir / "retargeted_meta.yaml",
-            "retargeted_quality": output_dir / "retargeted_quality.json",
-            "final_motion": output_dir / "final_motion.npz",
-            "final_metadata": output_dir / "final_meta.yaml",
-            "final_quality": output_dir / "final_quality.json",
+            "final_motion": final_output_dir / "final_motion.npz",
+            "final_metadata": final_output_dir / "final_meta.yaml",
+            "final_quality": final_output_dir / "final_quality.json",
         }
+        if export_retargeted:
+            paths.update(
+                {
+                    "retargeted_motion": output_dir / "retargeted_motion.npz",
+                    "retargeted_metadata": output_dir / "retargeted_meta.yaml",
+                    "retargeted_quality": output_dir / "retargeted_quality.json",
+                }
+            )
         if human_path is not None:
             paths["human"] = human_path
 
-        export_retargeted_motion(
-            retargeted_motion,
-            paths["retargeted_motion"],
-            metadata_path=paths["retargeted_metadata"],
-            quality_path=paths["retargeted_quality"],
-        )
+        reporter.stage("Export refine outputs")
+        if not export_retargeted:
+            _clear_top_level_refine_retargeted_outputs(output_dir)
+        if final_output_dir != output_dir:
+            _clear_top_level_refine_final_outputs(output_dir)
+        if export_retargeted:
+            export_retargeted_motion(
+                retargeted_motion,
+                paths["retargeted_motion"],
+                metadata_path=paths["retargeted_metadata"],
+                quality_path=paths["retargeted_quality"],
+            )
         export_refined_motion(
             final_motion,
             paths["final_motion"],
@@ -338,11 +364,6 @@ class RefinePipeline:
             quality_report=quality_report,
             paths=paths,
         )
-        if not quality_report.valid and not allow_invalid:
-            raise RuntimeError(
-                "Refine output failed RefinementQualityReport. "
-                f"Failures: {quality_report.failures}. Use --allow-invalid to keep invalid outputs."
-            )
         return result
 
     def run_batch(
@@ -359,6 +380,7 @@ class RefinePipeline:
         mock_frames: int = 120,
         return_vertices: bool = True,
         export_human: bool = True,
+        export_retargeted: bool = False,
         refinement_config: Mapping[str, Any] | None = None,
         allow_invalid: bool = False,
         fail_fast: bool = False,
@@ -371,7 +393,9 @@ class RefinePipeline:
         dry_run: bool = False,
         summary_csv: Path | str | None = None,
         worker_devices: Sequence[str] | None = None,
+        progress: ProgressReporter | None = None,
     ) -> RefineBatchResult:
+        reporter = get_progress(progress)
         inputs = list(input_paths)
         if not inputs:
             raise ValueError("run_batch requires at least one input path.")
@@ -396,6 +420,7 @@ class RefinePipeline:
             mock_frames=mock_frames,
             return_vertices=return_vertices,
             export_human=export_human,
+            export_retargeted=export_retargeted,
             allow_invalid=allow_invalid,
             preprocess_config=self.config_paths.preprocess_config,
             scaler_config=self.config_paths.scaler_config,
@@ -406,12 +431,14 @@ class RefinePipeline:
             preserve_tree=preserve_tree,
             worker_devices=worker_devices,
         )
+        nested_progress = reporter.child(position_offset=1) if workers == 1 and reporter.enabled and reporter.forced else None
         task_processor = (
             make_refine_task_processor(
                 backend_factory=self.backend_factory,
                 refinement_fk_factory=self.refinement_fk_factory,
+                progress=nested_progress,
             )
-            if self.backend_factory is not None or self.refinement_fk_factory is not None
+            if self.backend_factory is not None or self.refinement_fk_factory is not None or nested_progress is not None
             else process_refine_batch_task
         )
         runner = BatchRefineRunner(
@@ -428,6 +455,7 @@ class RefinePipeline:
             skip_existing=skip_existing,
             overwrite=overwrite,
             dry_run=dry_run,
+            progress=reporter,
         )
         if summary_csv is not None:
             write_summary_csv(summary_csv, manifest)
@@ -836,12 +864,25 @@ def _retargeted_metadata(
     }
 
 
+def _clear_top_level_refine_final_outputs(output_dir: Path) -> None:
+    for name in ("final_motion.npz", "final_meta.yaml", "final_quality.json"):
+        path = output_dir / name
+        if path.exists() and path.is_file():
+            path.unlink()
+
+
+def _clear_top_level_refine_retargeted_outputs(output_dir: Path) -> None:
+    for name in ("retargeted_motion.npz", "retargeted_meta.yaml", "retargeted_quality.json"):
+        path = output_dir / name
+        if path.exists() and path.is_file():
+            path.unlink()
+
+
 def _batch_record_to_pipeline_result_item(record, *, allow_invalid: bool) -> RefineBatchItemResult:
-    blocking_failure = record.status == "failed" or (record.status == "invalid" and not allow_invalid)
     return RefineBatchItemResult(
         input_path=record.input,
         output_dir=Path(record.output_dir),
-        success=not blocking_failure and record.status not in {"pending", "running"},
+        success=record.status in {"success", "skipped"},
         paths={key: Path(value) for key, value in record.paths.items()},
         frame_count=record.frame_count,
         quality_valid=record.quality_valid,

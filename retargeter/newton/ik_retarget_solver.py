@@ -16,7 +16,7 @@ from .postprocess import PostprocessReport, apply_ik_postprocess
 from .robot_spec import RobotSpec
 
 
-IK_PASS_NAMES = ("coarse_alignment", "full_body_tracking")
+IK_PASS_NAMES = ("full_body_tracking",)
 
 
 @dataclass
@@ -62,6 +62,7 @@ class NewtonIKRetargetSolver:
 
         if getattr(self.backend, "robot_spec", self.robot_spec).robot != self.robot_spec.robot:
             raise ValueError("backend robot_spec does not match solver robot_spec.")
+        self._reusable_ik_solver = None
 
         self.target_builder = target_builder
         if self.target_builder is None:
@@ -70,7 +71,6 @@ class NewtonIKRetargetSolver:
                 _resolve_path(str(self.config["target_config"]), self.stage_config_path),
             )
 
-        self.robot_spec.require_body_names(self.target_builder.required_robot_body_names("coarse_alignment"))
         self.robot_spec.require_body_names(self.target_builder.required_robot_body_names("full_body_tracking"))
 
     def solve_frame(
@@ -81,10 +81,8 @@ class NewtonIKRetargetSolver:
         contact_result: FootContactResult | None = None,
         previous_result: IKRetargetFrameResult | None = None,
     ) -> IKRetargetFrameResult:
-        coarse_targets = self.target_builder.build(motion, frame_idx, "coarse_alignment", contact_result=contact_result)
         tracking_targets = self.target_builder.build(motion, frame_idx, "full_body_tracking", contact_result=contact_result)
         return self.solve_target_sets(
-            coarse_targets,
             tracking_targets,
             frame_idx=frame_idx,
             fps=float(motion.fps),
@@ -93,46 +91,35 @@ class NewtonIKRetargetSolver:
 
     def solve_target_sets(
         self,
-        coarse_targets: IKTargetSet,
         tracking_targets: IKTargetSet,
         *,
         frame_idx: int,
         fps: float,
         previous_result: IKRetargetFrameResult | None = None,
     ) -> IKRetargetFrameResult:
-        coarse_targets = _target_set_with_pass_name(coarse_targets, "coarse_alignment")
         tracking_targets = _target_set_with_pass_name(tracking_targets, "full_body_tracking")
-        coarse_targets.validate()
         tracking_targets.validate()
         if fps <= 0.0 or not np.isfinite(fps):
             raise ValueError(f"fps must be positive and finite, got {fps!r}.")
 
         previous_state = previous_result.state() if previous_result is not None else None
-        seed_state = self._initial_state(coarse_targets, previous_state)
         previous_joint_pos = previous_state.joint_pos if previous_state is not None else None
         dt = 1.0 / float(fps)
 
-        coarse_result = self._solve_pass(
-            coarse_targets,
-            seed_state,
-            pass_name="coarse_alignment",
-            previous_joint_pos=previous_joint_pos,
-            dt=dt,
-        )
-        coarse_state = coarse_result.state
-        if not coarse_result.success and self._fallback_on_failure:
-            coarse_state = seed_state
+        fallback_used = False
+        seed_state = self._initial_state(tracking_targets, previous_state)
 
         tracking_result = self._solve_pass(
             tracking_targets,
-            coarse_state,
+            seed_state,
             pass_name="full_body_tracking",
             previous_joint_pos=previous_joint_pos,
             dt=dt,
         )
         final_state = tracking_result.state
         if not tracking_result.success and self._fallback_on_failure:
-            final_state = coarse_state
+            final_state = seed_state
+            fallback_used = True
 
         final_state = final_state.copy()
         joint_vel = np.zeros(self.robot_spec.num_dofs, dtype=np.float64)
@@ -140,13 +127,11 @@ class NewtonIKRetargetSolver:
             joint_vel = (final_state.joint_pos - previous_joint_pos) / dt
 
         body_state = self.backend.forward_kinematics(final_state)
-        success = bool(coarse_result.success and tracking_result.success)
+        success = bool(tracking_result.success)
         diagnostics = {
-            "coarse_alignment": _backend_result_diagnostics(coarse_result),
             "full_body_tracking": _backend_result_diagnostics(tracking_result),
-            "fallback_used": bool((not success) and self._fallback_on_failure),
+            "fallback_used": bool(fallback_used),
             "target_counts": {
-                "coarse_alignment": len(coarse_targets.targets),
                 "full_body_tracking": len(tracking_targets.targets),
             },
         }
@@ -183,7 +168,7 @@ class NewtonIKRetargetSolver:
             previous_joint_pos=previous_joint_pos,
         )
         settings = self._solve_settings(pass_name)
-        result = self.backend.solve_ik(seed_state, objectives, settings)
+        result = self._solve_backend_ik(seed_state, objectives, settings)
 
         q, report = apply_ik_postprocess(
             result.state.joint_pos,
@@ -208,6 +193,26 @@ class NewtonIKRetargetSolver:
             iterations=result.iterations,
             diagnostics=diagnostics,
         )
+
+    def _solve_backend_ik(
+        self,
+        seed_state: IKState,
+        objectives,
+        settings: NewtonSolveSettings,
+    ) -> BackendSolveResult:
+        factory = getattr(self.backend, "create_reusable_solver", None)
+        if factory is None:
+            return self.backend.solve_ik(seed_state, objectives, settings)
+
+        reusable = self._reusable_ik_solver
+        try:
+            if reusable is None or not reusable.compatible(objectives, settings):
+                reusable = factory(objectives, settings)
+                self._reusable_ik_solver = reusable
+            return reusable.solve(seed_state, objectives, settings)
+        except Exception:
+            self._reusable_ik_solver = None
+            return self.backend.solve_ik(seed_state, objectives, settings)
 
     def _initial_state(self, target_set: IKTargetSet, previous_state: IKState | None) -> IKState:
         if previous_state is not None:
@@ -312,14 +317,17 @@ def _validate_stage_config(config: dict[str, Any], path: Path) -> None:
     if missing:
         raise ValueError(f"Newton IK config {path} is missing required sections: {missing}.")
 
+    if "pass_mode" in config["solver"]:
+        raise ValueError(
+            f"Newton IK config {path} uses deprecated solver.pass_mode. "
+            "IK retargeting is single-pass full_body_tracking only."
+        )
     iterations = config["solver"].get("iterations", {})
     if not isinstance(iterations, dict):
         raise ValueError(f"Newton IK config {path} solver.iterations must be a mapping.")
     normalized = {_canonical_pass_name(name): value for name, value in iterations.items()}
-    if any(name not in normalized for name in IK_PASS_NAMES):
-        raise ValueError(
-            f"Newton IK config {path} solver.iterations must define coarse_alignment and full_body_tracking."
-        )
+    if "full_body_tracking" not in normalized:
+        raise ValueError(f"Newton IK config {path} solver.iterations must define full_body_tracking.")
     config["solver"]["iterations"] = normalized
 
 

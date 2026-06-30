@@ -4,8 +4,7 @@ target_config: retargeter/scale/configs/g1_23_ik_targets.yaml
 
 solver:
   iterations:
-    coarse_alignment: 24
-    full_body_tracking: 24
+    full_body_tracking: 8
   step_size: 1.0
   optimizer: lm
   jacobian_mode: analytic

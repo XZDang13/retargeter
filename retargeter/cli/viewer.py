@@ -10,6 +10,7 @@ from retargeter.pipeline import ViewerPipeline
 
 def main(argv: list[str] | None = None, *, backend=None, viewer_factory=None) -> int:
     args = _build_parser().parse_args(argv)
+    realtime = _resolve_realtime(args.viewer, args.realtime)
     result = ViewerPipeline().replay(
         input_path=args.input,
         output_dir=args.output,
@@ -19,7 +20,7 @@ def main(argv: list[str] | None = None, *, backend=None, viewer_factory=None) ->
         fps=args.fps,
         loop=bool(args.loop),
         max_loops=None if bool(args.loop) else 1,
-        realtime=bool(args.realtime),
+        realtime=realtime,
         port=args.port,
         share=bool(args.share),
         replay_name=args.replay_name,
@@ -44,6 +45,12 @@ def parse_human_offset(raw: str | None):
     return values
 
 
+def _resolve_realtime(viewer: str, raw: int | None) -> bool:
+    if raw is not None:
+        return bool(raw)
+    return str(viewer).lower() in {"gl", "viser"}
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="View online or refined retargeting outputs.")
     parser.add_argument("--input", type=Path, required=True, help="Output directory or motion npz.")
@@ -53,7 +60,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--viewer", choices=["file", "usd", "viser", "gl", "null"], default="file")
     parser.add_argument("--fps", type=float, default=None)
     parser.add_argument("--loop", type=int, choices=[0, 1], default=0)
-    parser.add_argument("--realtime", type=int, choices=[0, 1], default=0)
+    parser.add_argument("--realtime", type=int, choices=[0, 1], default=None)
     parser.add_argument("--port", type=int, default=8080)
     parser.add_argument("--share", type=int, choices=[0, 1], default=0)
     parser.add_argument("--replay-name", default=None)

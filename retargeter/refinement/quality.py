@@ -29,6 +29,8 @@ DEFAULT_PHYSICAL_FEASIBILITY_CONFIG: dict[str, float | bool] = {
     "enabled": True,
     "max_joint_acceleration_rad_s2": 800.0,
     "max_joint_jerk_rad_s3": 40000.0,
+    "joint_dynamics_gate_percentile": 99.5,
+    "max_joint_dynamics_violation_duration_s": 0.10,
     "max_foot_penetration_m": 0.03,
     "max_weighted_foot_height_m": 0.18,
     "fail_on_pelvis_height": False,
@@ -36,7 +38,7 @@ DEFAULT_PHYSICAL_FEASIBILITY_CONFIG: dict[str, float | bool] = {
     "fail_on_support_unavailable": True,
     "support_contact_threshold": 0.5,
     "support_max_foot_height_m": 0.08,
-    "max_unsupported_duration_s": 1.0,
+    "max_unsupported_duration_s": 1.25,
     "max_unsupported_fraction": 0.35,
     "bos_margin_m": 0.35,
     "max_bos_violation_fraction": 0.50,
@@ -125,7 +127,7 @@ def evaluate_refinement_quality(
         if metrics["skating_improvement_m_s"] < min_improvement - tolerance:
             failures.append("skating_not_improved")
 
-    metrics.update(_dynamics_metrics(refined, float(refined.fps)))
+    metrics.update(_dynamics_metrics(refined, float(refined.fps), physical_thresholds))
     metrics.update(_support_metrics(refined, contact_points, float(resolved_ground), physical_thresholds, contact_available))
     metrics["physical_feasibility_enabled"] = bool(physical_thresholds["physical_feasibility_enabled"])
     failures.extend(_physical_feasibility_failures(metrics, physical_thresholds))
@@ -318,11 +320,28 @@ def _contact_metrics(
     }
 
 
-def _dynamics_metrics(refined: RefinedMotion, fps: float) -> dict[str, float]:
+def _dynamics_metrics(refined: RefinedMotion, fps: float, thresholds: Mapping[str, Any]) -> dict[str, float]:
+    gate_percentile = float(thresholds["joint_dynamics_gate_percentile"])
     root_acc = _finite_difference_stats(np.asarray(refined.root_pos_w, dtype=np.float64), fps, order=2, vector_norm=True)
     root_jerk = _finite_difference_stats(np.asarray(refined.root_pos_w, dtype=np.float64), fps, order=3, vector_norm=True)
-    joint_acc = _finite_difference_stats(np.asarray(refined.joint_pos, dtype=np.float64), fps, order=2, vector_norm=False)
-    joint_jerk = _finite_difference_stats(np.asarray(refined.joint_pos, dtype=np.float64), fps, order=3, vector_norm=False)
+    joint_acc = _finite_difference_stats(
+        np.asarray(refined.joint_pos, dtype=np.float64),
+        fps,
+        order=2,
+        vector_norm=False,
+        percentile=gate_percentile,
+        frame_gate=True,
+        violation_threshold=float(thresholds["max_joint_acceleration_rad_s2"]),
+    )
+    joint_jerk = _finite_difference_stats(
+        np.asarray(refined.joint_pos, dtype=np.float64),
+        fps,
+        order=3,
+        vector_norm=False,
+        percentile=gate_percentile,
+        frame_gate=True,
+        violation_threshold=float(thresholds["max_joint_jerk_rad_s3"]),
+    )
     body_acc = _finite_difference_stats(np.asarray(refined.body_pos_w, dtype=np.float64), fps, order=2, vector_norm=True)
     body_jerk = _finite_difference_stats(np.asarray(refined.body_pos_w, dtype=np.float64), fps, order=3, vector_norm=True)
     return {
@@ -332,8 +351,13 @@ def _dynamics_metrics(refined: RefinedMotion, fps: float) -> dict[str, float]:
         "root_jerk_max_m_s3": root_jerk[1],
         "joint_acceleration_mean_rad_s2": joint_acc[0],
         "joint_acceleration_max_rad_s2": joint_acc[1],
+        "joint_acceleration_gate_rad_s2": joint_acc[2],
+        "joint_acceleration_violation_max_duration_s": joint_acc[3],
         "joint_jerk_mean_rad_s3": joint_jerk[0],
         "joint_jerk_max_rad_s3": joint_jerk[1],
+        "joint_jerk_gate_rad_s3": joint_jerk[2],
+        "joint_jerk_violation_max_duration_s": joint_jerk[3],
+        "joint_dynamics_gate_percentile": gate_percentile,
         "body_acceleration_mean_m_s2": body_acc[0],
         "body_acceleration_max_m_s2": body_acc[1],
         "body_jerk_mean_m_s3": body_jerk[0],
@@ -405,9 +429,17 @@ def _physical_feasibility_failures(metrics: Mapping[str, Any], thresholds: Mappi
     failures: list[str] = []
     if int(metrics["joint_velocity_violation_count"]) > 0:
         failures.append("joint_velocity_violation")
-    if float(metrics["joint_acceleration_max_rad_s2"]) > float(thresholds["max_joint_acceleration_rad_s2"]):
+    if (
+        float(metrics["joint_acceleration_gate_rad_s2"]) > float(thresholds["max_joint_acceleration_rad_s2"])
+        or float(metrics["joint_acceleration_violation_max_duration_s"])
+        > float(thresholds["max_joint_dynamics_violation_duration_s"])
+    ):
         failures.append("joint_acceleration_violation")
-    if float(metrics["joint_jerk_max_rad_s3"]) > float(thresholds["max_joint_jerk_rad_s3"]):
+    if (
+        float(metrics["joint_jerk_gate_rad_s3"]) > float(thresholds["max_joint_jerk_rad_s3"])
+        or float(metrics["joint_jerk_violation_max_duration_s"])
+        > float(thresholds["max_joint_dynamics_violation_duration_s"])
+    ):
         failures.append("joint_jerk_violation")
     if float(metrics["refined_penetration_max_m"]) > float(thresholds["max_foot_penetration_m"]):
         failures.append("foot_penetration")
@@ -499,6 +531,11 @@ def _physical_feasibility_thresholds(config: Mapping[str, Any] | None) -> dict[s
     for key, value in thresholds.items():
         if key != "physical_feasibility_enabled" and isinstance(value, float) and value < 0.0:
             raise ValueError(f"physical_feasibility.{key} must be non-negative, got {value!r}.")
+    percentile = float(thresholds["joint_dynamics_gate_percentile"])
+    if percentile <= 0.0 or percentile > 100.0:
+        raise ValueError(
+            f"physical_feasibility.joint_dynamics_gate_percentile must be in (0, 100], got {percentile!r}."
+        )
     return thresholds
 
 
@@ -679,15 +716,33 @@ def _max_true_run_duration(mask: np.ndarray, fps: float) -> float:
     return float(max_run / max(float(fps), EPS))
 
 
-def _finite_difference_stats(values: np.ndarray, fps: float, *, order: int, vector_norm: bool) -> tuple[float, float]:
+def _finite_difference_stats(
+    values: np.ndarray,
+    fps: float,
+    *,
+    order: int,
+    vector_norm: bool,
+    percentile: float | None = None,
+    frame_gate: bool = False,
+    violation_threshold: float | None = None,
+) -> tuple[float, float, float, float]:
     if values.shape[0] <= order:
-        return 0.0, 0.0
+        return 0.0, 0.0, 0.0, 0.0
     diff = np.diff(values, n=order, axis=0) * (float(fps) ** order)
     if vector_norm:
         series = _safe_norm(diff, axis=-1)
     else:
         series = np.abs(diff)
-    return _finite_mean(series), _finite_max(series)
+    max_value = _finite_max(series)
+    gate_series = _frame_max_series(series) if frame_gate else series
+    if percentile is None:
+        gate_value = max_value
+    else:
+        gate_value = _finite_percentile(gate_series, percentile)
+    violation_duration = 0.0
+    if violation_threshold is not None:
+        violation_duration = _max_true_run_duration(gate_series > float(violation_threshold), float(fps))
+    return _finite_mean(series), max_value, gate_value, violation_duration
 
 
 def _quat_error(pred: np.ndarray, target: np.ndarray) -> np.ndarray:
@@ -732,6 +787,16 @@ def _safe_norm(value: np.ndarray, axis: int) -> np.ndarray:
     return np.where(finite, norm, np.nan)
 
 
+def _frame_max_series(value: np.ndarray) -> np.ndarray:
+    arr = np.asarray(value, dtype=np.float64)
+    if arr.ndim <= 1:
+        return arr
+    finite = np.isfinite(arr)
+    safe = np.where(finite, arr, -np.inf)
+    frame_max = np.max(safe.reshape((safe.shape[0], -1)), axis=1)
+    return np.where(np.isfinite(frame_max), frame_max, np.nan)
+
+
 def _finite_mean(value: np.ndarray) -> float:
     arr = np.asarray(value, dtype=np.float64)
     finite = arr[np.isfinite(arr)]
@@ -746,6 +811,14 @@ def _finite_max(value: np.ndarray) -> float:
     if finite.size == 0:
         return 0.0
     return float(np.max(finite))
+
+
+def _finite_percentile(value: np.ndarray, percentile: float) -> float:
+    arr = np.asarray(value, dtype=np.float64)
+    finite = arr[np.isfinite(arr)]
+    if finite.size == 0:
+        return 0.0
+    return float(np.percentile(finite, float(percentile)))
 
 
 def _finite_min(value: np.ndarray) -> float:

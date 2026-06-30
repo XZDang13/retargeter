@@ -5,12 +5,14 @@ from pathlib import Path
 
 from retargeter.batch import assign_device, discover_inputs, parse_gpu_ids
 from retargeter.pipeline import RefinePipeline, load_refinement_config_file, refinement_config_with_overrides
+from retargeter.progress import make_progress
 
 
 def main(argv: list[str] | None = None, *, backend_factory=None, refinement_fk_factory=None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
     _validate_input_mode(parser, args)
+    progress = make_progress(args.progress)
     config = refinement_config_with_overrides(
         load_refinement_config_file(args.refinement_config),
         iterations=args.refinement_iterations,
@@ -53,6 +55,7 @@ def main(argv: list[str] | None = None, *, backend_factory=None, refinement_fk_f
             mock_frames=args.mock_frames,
             return_vertices=not args.no_vertices,
             export_human=not args.no_human_output,
+            export_retargeted=bool(args.save_retargeted),
             refinement_config=config,
             allow_invalid=bool(args.allow_invalid),
             fail_fast=bool(args.fail_fast),
@@ -65,6 +68,7 @@ def main(argv: list[str] | None = None, *, backend_factory=None, refinement_fk_f
             dry_run=bool(args.dry_run),
             summary_csv=args.summary_csv,
             worker_devices=worker_devices,
+            progress=progress,
         )
         print(batch_result.manifest_path)
         return 0 if batch_result.failure_count == 0 else 1
@@ -81,8 +85,10 @@ def main(argv: list[str] | None = None, *, backend_factory=None, refinement_fk_f
         mock_frames=args.mock_frames,
         return_vertices=not args.no_vertices,
         export_human=not args.no_human_output,
+        export_retargeted=bool(args.save_retargeted),
         refinement_config=config,
         allow_invalid=bool(args.allow_invalid),
+        progress=progress,
     )
     for key in ("retargeted_motion", "retargeted_metadata", "retargeted_quality", "final_motion", "final_metadata", "final_quality", "human"):
         path = result.paths.get(key)
@@ -107,7 +113,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--mock-frames", type=int, default=120)
     parser.add_argument("--no-vertices", action="store_true")
     parser.add_argument("--no-human-output", action="store_true", help="Skip human.npz export.")
-    parser.add_argument("--allow-invalid", action="store_true", help="Allow invalid refinement quality reports.")
+    parser.add_argument("--save-retargeted", action="store_true", help="Save IK-stage retargeted outputs for debugging.")
+    parser.add_argument(
+        "--allow-invalid",
+        action="store_true",
+        help="Write invalid final outputs in the normal output layout instead of the rejected/ subtree.",
+    )
     parser.add_argument("--preprocess-config", type=Path, default=None)
     parser.add_argument("--scaler-config", type=Path, default=None)
     parser.add_argument("--target-config", type=Path, default=None)
@@ -135,6 +146,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--preserve-tree", action="store_true", help="Preserve --input-dir relative paths under --output.")
     parser.add_argument("--dry-run", action="store_true", help="Write planned batch manifest without retargeting.")
     parser.add_argument("--summary-csv", type=Path, default=None, help="Optional CSV summary path for batch runs.")
+    parser.add_argument("--progress", choices=["auto", "on", "off"], default="auto", help="Show tqdm progress on stderr.")
     return parser
 
 

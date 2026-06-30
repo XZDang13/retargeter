@@ -78,7 +78,8 @@ def build_target_objectives(target_set: IKTargetSet, robot_spec: RobotSpec) -> l
     for target in target_set.targets:
         robot_spec.require_body_names([target.robot_body_name])
         confidence = float(target.confidence)
-        if target.target_pos_w is not None and target.pos_weight > 0.0:
+        can_activate_position = bool(target.metadata.get("can_activate_position", False))
+        if target.target_pos_w is not None and (target.pos_weight > 0.0 or can_activate_position):
             descriptors.append(
                 IKObjectiveDescriptor(
                     kind="position",

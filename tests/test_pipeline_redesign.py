@@ -8,6 +8,7 @@ import pytest
 import torch
 
 from retargeter.cli import online, refine, viewer
+import retargeter.pipeline as pipeline_module
 from retargeter.newton import BackendSolveResult, IKState, NewtonSolveSettings, RobotBodyState, RobotSpec
 from retargeter.pipeline import OnlineRetargeter, RefinePipeline, ViewerPipeline
 from retargeter.refinement import RefinedMotion, export_refined_motion
@@ -150,8 +151,8 @@ def test_online_retargeter_step_uses_warm_start_and_reset():
     retargeter.step(motion, 1)
 
     backend = backend_instances[0]
-    assert len(backend.calls) == 4
-    np.testing.assert_allclose(backend.calls[2]["seed"].joint_pos, first.joint_pos)
+    assert len(backend.calls) == 2
+    np.testing.assert_allclose(backend.calls[1]["seed"].joint_pos, first.joint_pos)
 
     retargeter.reset()
     retargeter.step(motion, 0)
@@ -193,6 +194,36 @@ def test_refine_cli_writes_final_training_layout(tmp_path: Path):
         refinement_fk_factory=lambda spec: FakeTorchFK(spec),
     ) == 0
 
+    for name in ("final_motion.npz", "final_meta.yaml", "final_quality.json"):
+        assert (output / name).exists(), name
+    for name in ("retargeted_motion.npz", "retargeted_meta.yaml", "retargeted_quality.json"):
+        assert not (output / name).exists(), name
+    assert not (output / "motion.npz").exists()
+    assert not (output / "refinement_motion.npz").exists()
+
+
+def test_refine_cli_save_retargeted_writes_debug_ik_stage_outputs(tmp_path: Path):
+    output = tmp_path / "refine_debug"
+    assert refine.main(
+        [
+            "--input",
+            "mock",
+            "--output",
+            str(output),
+            "--mock-frames",
+            "2",
+            "--refinement-iterations",
+            "0",
+            "--refinement-dtype",
+            "float64",
+            "--refinement-lbfgs",
+            "0",
+            "--save-retargeted",
+        ],
+        backend_factory=MockBackend,
+        refinement_fk_factory=lambda spec: FakeTorchFK(spec),
+    ) == 0
+
     for name in (
         "retargeted_motion.npz",
         "retargeted_meta.yaml",
@@ -202,8 +233,64 @@ def test_refine_cli_writes_final_training_layout(tmp_path: Path):
         "final_quality.json",
     ):
         assert (output / name).exists(), name
-    assert not (output / "motion.npz").exists()
-    assert not (output / "refinement_motion.npz").exists()
+
+
+def test_refine_cli_progress_on_writes_stderr_only_for_progress(tmp_path: Path, capsys):
+    output = tmp_path / "refine_progress"
+    assert refine.main(
+        [
+            "--input",
+            "mock",
+            "--output",
+            str(output),
+            "--mock-frames",
+            "2",
+            "--refinement-iterations",
+            "1",
+            "--refinement-dtype",
+            "float64",
+            "--refinement-lbfgs",
+            "0",
+            "--progress",
+            "on",
+        ],
+        backend_factory=MockBackend,
+        refinement_fk_factory=lambda spec: FakeTorchFK(spec),
+    ) == 0
+
+    captured = capsys.readouterr()
+    assert "IK retarget" in captured.err
+    assert "Refine Adam" in captured.err
+    assert str(output / "final_motion.npz") in captured.out
+    assert "IK retarget" not in captured.out
+
+
+def test_refine_cli_progress_off_is_quiet(tmp_path: Path, capsys):
+    output = tmp_path / "refine_no_progress"
+    assert refine.main(
+        [
+            "--input",
+            "mock",
+            "--output",
+            str(output),
+            "--mock-frames",
+            "2",
+            "--refinement-iterations",
+            "1",
+            "--refinement-dtype",
+            "float64",
+            "--refinement-lbfgs",
+            "0",
+            "--progress",
+            "off",
+        ],
+        backend_factory=MockBackend,
+        refinement_fk_factory=lambda spec: FakeTorchFK(spec),
+    ) == 0
+
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert str(output / "final_motion.npz") in captured.out
 
 
 def test_refine_cli_batch_writes_per_input_layout_and_manifest(tmp_path: Path):
@@ -229,15 +316,10 @@ def test_refine_cli_batch_writes_per_input_layout_and_manifest(tmp_path: Path):
     ) == 0
 
     for item_dir in (output / "mock", output / "mock__2"):
-        for name in (
-            "retargeted_motion.npz",
-            "retargeted_meta.yaml",
-            "retargeted_quality.json",
-            "final_motion.npz",
-            "final_meta.yaml",
-            "final_quality.json",
-        ):
+        for name in ("final_motion.npz", "final_meta.yaml", "final_quality.json"):
             assert (item_dir / name).exists(), f"{item_dir / name}"
+        for name in ("retargeted_motion.npz", "retargeted_meta.yaml", "retargeted_quality.json"):
+            assert not (item_dir / name).exists(), f"{item_dir / name}"
 
     manifest = json.loads((output / "batch_manifest.json").read_text(encoding="utf-8"))
     assert manifest["pipeline"] == "refine_batch"
@@ -246,6 +328,68 @@ def test_refine_cli_batch_writes_per_input_layout_and_manifest(tmp_path: Path):
     assert manifest["failure_count"] == 0
     assert [Path(item["output_dir"]).name for item in manifest["items"]] == ["mock", "mock__2"]
     assert [item["status"] for item in manifest["items"]] == ["success", "success"]
+    assert all("retargeted_motion" not in item["paths"] for item in manifest["items"])
+
+
+def test_refine_cli_batch_save_retargeted_writes_debug_ik_stage_outputs(tmp_path: Path):
+    output = tmp_path / "batch_debug"
+    assert refine.main(
+        [
+            "--inputs",
+            "mock",
+            "mock",
+            "--output",
+            str(output),
+            "--mock-frames",
+            "2",
+            "--refinement-iterations",
+            "0",
+            "--refinement-dtype",
+            "float64",
+            "--refinement-lbfgs",
+            "0",
+            "--save-retargeted",
+        ],
+        backend_factory=MockBackend,
+        refinement_fk_factory=lambda spec: FakeTorchFK(spec),
+    ) == 0
+
+    for item_dir in (output / "mock", output / "mock__2"):
+        for name in ("retargeted_motion.npz", "retargeted_meta.yaml", "retargeted_quality.json"):
+            assert (item_dir / name).exists(), f"{item_dir / name}"
+    manifest = json.loads((output / "batch_manifest.json").read_text(encoding="utf-8"))
+    assert all("retargeted_motion" in item["paths"] for item in manifest["items"])
+
+
+def test_refine_cli_batch_progress_on_writes_item_bar_to_stderr(tmp_path: Path, capsys):
+    output = tmp_path / "batch_progress"
+    assert refine.main(
+        [
+            "--inputs",
+            "mock",
+            "mock",
+            "--output",
+            str(output),
+            "--mock-frames",
+            "2",
+            "--refinement-iterations",
+            "0",
+            "--refinement-dtype",
+            "float64",
+            "--refinement-lbfgs",
+            "0",
+            "--progress",
+            "on",
+        ],
+        backend_factory=MockBackend,
+        refinement_fk_factory=lambda spec: FakeTorchFK(spec),
+    ) == 0
+
+    captured = capsys.readouterr()
+    assert "Batch refine" in captured.err
+    assert "IK retarget" in captured.err
+    assert str(output / "batch_manifest.json") in captured.out
+    assert "Batch refine" not in captured.out
 
 
 def test_refine_cli_batch_records_failure_and_continues(tmp_path: Path):
@@ -356,20 +500,27 @@ def test_refine_pipeline_run_batch_returns_lightweight_results(tmp_path: Path):
     assert [item.frame_count for item in result.items] == [2, 2]
     assert all(item.success for item in result.items)
     assert all((item.output_dir / "final_motion.npz").exists() for item in result.items)
+    assert all("retargeted_motion" not in item.paths for item in result.items)
+    assert all(not (item.output_dir / "retargeted_motion.npz").exists() for item in result.items)
 
 
-def test_refine_rejects_invalid_quality_unless_allowed(tmp_path: Path):
-    with pytest.raises(RuntimeError, match="RefinementQualityReport"):
-        RefinePipeline(
-            robot="g1_29",
-            backend_factory=MockBackend,
-            refinement_fk_factory=lambda spec: FakeTorchFK(spec, x_offset=1.0),
-        ).run(
-            input_path="mock",
-            output_dir=tmp_path / "invalid",
-            mock_frames=2,
-            refinement_config={"refiner": {"iterations": 0, "dtype": "float64"}},
-        )
+def test_refine_rejects_invalid_quality_without_error_unless_allowed(tmp_path: Path):
+    rejected_output = tmp_path / "invalid"
+    rejected = RefinePipeline(
+        robot="g1_29",
+        backend_factory=MockBackend,
+        refinement_fk_factory=lambda spec: FakeTorchFK(spec, x_offset=1.0),
+    ).run(
+        input_path="mock",
+        output_dir=rejected_output,
+        mock_frames=2,
+        refinement_config={"refiner": {"iterations": 0, "dtype": "float64"}},
+    )
+
+    assert rejected.quality_report.valid is False
+    assert rejected.paths["final_motion"] == rejected_output / "rejected" / "final_motion.npz"
+    assert (rejected_output / "rejected" / "final_motion.npz").exists()
+    assert not (rejected_output / "final_motion.npz").exists()
 
     result = RefinePipeline(
         robot="g1_29",
@@ -384,6 +535,7 @@ def test_refine_rejects_invalid_quality_unless_allowed(tmp_path: Path):
     )
     assert result.quality_report.valid is False
     assert (tmp_path / "allowed" / "final_motion.npz").exists()
+    assert not (tmp_path / "allowed" / "rejected" / "final_motion.npz").exists()
 
 
 def test_refine_physical_feasibility_failure_exports_invalid_quality_and_allow_invalid(tmp_path: Path):
@@ -393,25 +545,45 @@ def test_refine_physical_feasibility_failure_exports_invalid_quality_and_allow_i
     }
     invalid_output = tmp_path / "physical_invalid"
 
-    with pytest.raises(RuntimeError, match="RefinementQualityReport"):
-        RefinePipeline(
-            robot="g1_29",
-            backend_factory=MockBackend,
-            refinement_fk_factory=lambda spec: FakeTorchFK(spec),
-        ).run(
-            input_path="mock",
-            output_dir=invalid_output,
-            mock_frames=2,
-            refinement_config=config,
-        )
+    invalid_result = RefinePipeline(
+        robot="g1_29",
+        backend_factory=MockBackend,
+        refinement_fk_factory=lambda spec: FakeTorchFK(spec),
+    ).run(
+        input_path="mock",
+        output_dir=invalid_output,
+        mock_frames=2,
+        refinement_config=config,
+    )
 
-    invalid_quality = json.loads((invalid_output / "final_quality.json").read_text(encoding="utf-8"))
+    assert invalid_result.quality_report.valid is False
+    assert not (invalid_output / "final_motion.npz").exists()
+    invalid_quality = json.loads((invalid_output / "rejected" / "final_quality.json").read_text(encoding="utf-8"))
     invalid_report = invalid_quality["quality_report"]
     assert invalid_report["valid"] is False
     assert "pelvis_height_too_low" in invalid_report["failures"]
 
     config_path = tmp_path / "physical_config.json"
     config_path.write_text(json.dumps(config), encoding="utf-8")
+    cli_rejected_output = tmp_path / "physical_cli_rejected"
+    assert refine.main(
+        [
+            "--input",
+            "mock",
+            "--output",
+            str(cli_rejected_output),
+            "--mock-frames",
+            "2",
+            "--refinement-config",
+            str(config_path),
+        ],
+        backend_factory=MockBackend,
+        refinement_fk_factory=lambda spec: FakeTorchFK(spec),
+    ) == 0
+    cli_rejected_quality = json.loads((cli_rejected_output / "rejected" / "final_quality.json").read_text(encoding="utf-8"))
+    assert cli_rejected_quality["valid"] is False
+    assert not (cli_rejected_output / "final_motion.npz").exists()
+
     allowed_output = tmp_path / "physical_allowed"
     assert refine.main(
         [
@@ -460,13 +632,15 @@ def test_refine_cli_batch_physical_feasibility_records_invalid_items(tmp_path: P
         ],
         backend_factory=MockBackend,
         refinement_fk_factory=lambda spec: FakeTorchFK(spec),
-    ) == 1
+    ) == 0
 
     manifest = json.loads((output / "batch_manifest.json").read_text(encoding="utf-8"))
     assert manifest["success_count"] == 0
-    assert manifest["failure_count"] == 2
+    assert manifest["failure_count"] == 0
     assert [item["status"] for item in manifest["items"]] == ["invalid", "invalid"]
-    assert all("pelvis_height_too_low" in item["error"] for item in manifest["items"])
+    assert all(item["error"] is None for item in manifest["items"])
+    assert all("pelvis_height_too_low" in item["quality_summary"]["failures"] for item in manifest["items"])
+    assert all(Path(item["paths"]["final_motion"]).parent.name == "rejected" for item in manifest["items"])
 
 
 def test_viewer_pipeline_loads_refine_directory_refinement_without_success_field(tmp_path: Path):
@@ -502,6 +676,38 @@ def test_viewer_cli_auto_loads_online_directory(tmp_path: Path):
         viewer_factory=fake_viewer_factory,
     ) == 0
     assert (tmp_path / "viewer" / "newton_replay.json").exists()
+
+
+def test_viewer_cli_defaults_realtime_for_interactive_viewers(tmp_path: Path, monkeypatch):
+    spec = RobotSpec.from_yaml(G1_29_ROBOT)
+    output = tmp_path / "online"
+    output.mkdir()
+    retargeted = _make_retargeted_motion(spec, frames=2)
+    export_retargeted_motion(retargeted, output / "online_motion.npz")
+    calls = []
+
+    def fake_replay(motion, robot_spec, **kwargs):
+        calls.append(kwargs)
+        return pipeline_module.NewtonReplayResult(
+            viewer=kwargs["viewer"],
+            frame_count=motion.num_frames(),
+            fps=float(kwargs.get("fps") or motion.fps),
+            output_path=kwargs.get("output_path"),
+        )
+
+    monkeypatch.setattr(pipeline_module, "replay_motion_with_newton", fake_replay)
+
+    assert viewer.main(["--input", str(output), "--viewer", "gl"]) == 0
+    assert calls[-1]["realtime"] is True
+
+    assert viewer.main(["--input", str(output), "--viewer", "file"]) == 0
+    assert calls[-1]["realtime"] is False
+
+    assert viewer.main(["--input", str(output), "--viewer", "gl", "--realtime", "0"]) == 0
+    assert calls[-1]["realtime"] is False
+
+    assert viewer.main(["--input", str(output), "--viewer", "file", "--realtime", "1"]) == 0
+    assert calls[-1]["realtime"] is True
 
 
 def _make_canonical_motion(frames: int):

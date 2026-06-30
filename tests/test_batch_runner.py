@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
 from pathlib import Path
 
 import numpy as np
@@ -8,6 +9,44 @@ import numpy as np
 from retargeter.batch.manifest import BatchItemRecord, BatchManifest, save_manifest, write_summary_csv
 from retargeter.batch.runner import BatchRefineRunner, build_refine_batch_tasks
 from retargeter.batch.worker import RefineBatchTask
+
+
+class RecordingProgressBar:
+    def __init__(self, *, total, desc, unit):
+        self.total = total
+        self.desc = desc
+        self.unit = unit
+        self.updates: list[int] = []
+        self.postfixes: list[dict] = []
+
+    def update(self, n: int = 1) -> None:
+        self.updates.append(int(n))
+
+    def set_postfix(self, ordered_dict=None, refresh=True, **kwargs) -> None:
+        values = dict(ordered_dict or {})
+        values.update(kwargs)
+        self.postfixes.append(values)
+
+
+class RecordingProgress:
+    enabled = True
+    forced = False
+
+    def __init__(self):
+        self.stages: list[str] = []
+        self.bars: list[RecordingProgressBar] = []
+
+    def stage(self, message: str) -> None:
+        self.stages.append(message)
+
+    def child(self, *, position_offset: int = 1):
+        return self
+
+    @contextmanager
+    def bar(self, *, total, desc, unit="it", leave=False):
+        bar = RecordingProgressBar(total=total, desc=desc, unit=unit)
+        self.bars.append(bar)
+        yield bar
 
 
 def fake_batch_worker(task: RefineBatchTask) -> BatchItemRecord:
@@ -94,6 +133,24 @@ def test_batch_refine_runner_sequential_failure_continue_and_incremental_manifes
     assert payload["failure_count"] == 1
 
 
+def test_batch_refine_runner_progress_updates_for_sequential_fail_fast(tmp_path: Path):
+    progress = RecordingProgress()
+    tasks = build_refine_batch_tasks(["fail", "ok", "ok2"], tmp_path / "out")
+    manifest = BatchRefineRunner(
+        manifest_path=tmp_path / "out" / "batch_manifest.json",
+        task_processor=fake_batch_worker,
+    ).run(tasks, workers=1, fail_fast=True, progress=progress)
+
+    assert [item.status for item in manifest.items] == ["failed", "skipped", "skipped"]
+    assert len(progress.bars) == 1
+    bar = progress.bars[0]
+    assert bar.desc == "Batch refine"
+    assert bar.total == 3
+    assert sum(bar.updates) == 3
+    assert bar.postfixes[-1]["failed"] == 1
+    assert bar.postfixes[-1]["skipped"] == 2
+
+
 def test_batch_refine_runner_fail_fast_skips_remaining(tmp_path: Path):
     tasks = build_refine_batch_tasks(["fail", "ok", "ok2"], tmp_path / "out")
     manifest = BatchRefineRunner(
@@ -142,6 +199,23 @@ def test_batch_refine_runner_parallel_with_fake_worker(tmp_path: Path):
     ).run(tasks, workers=2)
 
     assert sorted(item.status for item in manifest.items) == ["success", "success"]
+
+
+def test_batch_refine_runner_progress_updates_for_parallel_parent_completions(tmp_path: Path):
+    progress = RecordingProgress()
+    tasks = build_refine_batch_tasks(["ok", "ok2"], tmp_path / "out")
+    manifest = BatchRefineRunner(
+        manifest_path=tmp_path / "out" / "batch_manifest.json",
+        task_processor=fake_batch_worker,
+    ).run(tasks, workers=2, progress=progress)
+
+    assert sorted(item.status for item in manifest.items) == ["success", "success"]
+    assert len(progress.bars) == 1
+    bar = progress.bars[0]
+    assert bar.total == 2
+    assert sum(bar.updates) == 2
+    assert bar.postfixes[-1]["ok"] == 2
+    assert bar.postfixes[-1]["workers"] == 2
 
 
 def _write_existing_outputs(output_dir: Path) -> None:

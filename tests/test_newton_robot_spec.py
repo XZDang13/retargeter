@@ -47,5 +47,4 @@ def test_robot_specs_cover_stage_target_required_bodies():
     ]
 
     for spec, builder in cases:
-        spec.require_body_names(builder.required_robot_body_names("coarse_alignment"))
         spec.require_body_names(builder.required_robot_body_names("full_body_tracking"))

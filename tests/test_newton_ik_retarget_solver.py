@@ -60,7 +60,48 @@ class MockBackend:
         return RobotBodyState(list(self.robot_spec.body_names), body_pos, body_quat)
 
 
-def test_ik_retarget_solver_single_frame_uses_coarse_alignment_then_full_body_tracking():
+class MockReusableSolver:
+    def __init__(self, backend: "MockReusableBackend"):
+        self.backend = backend
+
+    def compatible(self, objectives, settings: NewtonSolveSettings) -> bool:
+        return True
+
+    def solve(self, seed_state: IKState, objectives, settings: NewtonSolveSettings) -> BackendSolveResult:
+        call_index = len(self.backend.reusable_calls)
+        self.backend.reusable_calls.append(
+            {
+                "seed": seed_state.copy(),
+                "objectives": list(objectives),
+                "settings": settings,
+            }
+        )
+        q = seed_state.joint_pos.copy() + self.backend.joint_delta * (call_index + 1)
+        return BackendSolveResult(
+            state=IKState(
+                root_pos_w=seed_state.root_pos_w.copy(),
+                root_quat_xyzw=seed_state.root_quat_xyzw.copy(),
+                joint_pos=q,
+            ),
+            success=True,
+            cost=float(call_index),
+            iterations=settings.iterations,
+            diagnostics={"mock_reusable_call_index": call_index, "reused_solver": True},
+        )
+
+
+class MockReusableBackend(MockBackend):
+    def __init__(self, robot_spec: RobotSpec, *, joint_delta: float = 0.01):
+        super().__init__(robot_spec, joint_delta=joint_delta)
+        self.reusable_builds = 0
+        self.reusable_calls = []
+
+    def create_reusable_solver(self, objectives, settings: NewtonSolveSettings) -> MockReusableSolver:
+        self.reusable_builds += 1
+        return MockReusableSolver(self)
+
+
+def test_ik_retarget_solver_single_frame_uses_full_body_tracking_only():
     spec = RobotSpec.from_yaml(G1_29_ROBOT)
     backend = MockBackend(spec)
     solver = NewtonIKRetargetSolver(G1_29_NEWTON, backend=backend)
@@ -71,12 +112,10 @@ def test_ik_retarget_solver_single_frame_uses_coarse_alignment_then_full_body_tr
     assert result.success
     assert result.joint_pos.shape == (29,)
     assert result.body_state.body_pos_w.shape == (len(spec.body_names), 3)
-    assert len(backend.calls) == 2
-    assert backend.calls[0]["settings"].iterations == 24
-    assert backend.calls[1]["settings"].iterations == 24
-    assert len(backend.calls[1]["objectives"]) > len(backend.calls[0]["objectives"])
-    assert result.diagnostics["coarse_alignment"]["success"]
+    assert len(backend.calls) == 1
+    assert backend.calls[0]["settings"].iterations == 8
     assert result.diagnostics["full_body_tracking"]["success"]
+    assert result.diagnostics["target_counts"] == {"full_body_tracking": 20}
 
 
 def test_ik_retarget_solver_warm_starts_from_previous_result():
@@ -89,13 +128,13 @@ def test_ik_retarget_solver_warm_starts_from_previous_result():
     second = solver.solve_frame(motion, frame_idx=1, previous_result=first)
 
     assert second.success
-    assert np.allclose(backend.calls[2]["seed"].joint_pos, first.joint_pos)
+    assert np.allclose(backend.calls[1]["seed"].joint_pos, first.joint_pos)
     assert np.any(second.joint_vel != 0.0)
 
 
 def test_ik_retarget_solver_falls_back_without_dropping_frame():
     spec = RobotSpec.from_yaml(G1_29_ROBOT)
-    backend = MockBackend(spec, fail_call_indices={1})
+    backend = MockBackend(spec, fail_call_indices={0})
     solver = NewtonIKRetargetSolver(G1_29_NEWTON, backend=backend)
     motion = make_canonical_motion(num_frames=2)
 
@@ -107,7 +146,7 @@ def test_ik_retarget_solver_falls_back_without_dropping_frame():
     assert result.joint_pos.shape == (29,)
 
 
-def test_sequence_runner_keeps_100_frames_and_calls_two_stages_per_frame():
+def test_sequence_runner_keeps_100_frames_and_calls_one_solve_per_frame():
     spec = RobotSpec.from_yaml(G1_29_ROBOT)
     backend = MockBackend(spec, joint_delta=0.001)
     solver = NewtonIKRetargetSolver(G1_29_NEWTON, backend=backend)
@@ -120,7 +159,22 @@ def test_sequence_runner_keeps_100_frames_and_calls_two_stages_per_frame():
     assert retargeted_motion.joint_pos.shape == (100, 29)
     assert retargeted_motion.body_pos_w.shape == (100, len(spec.body_names), 3)
     assert np.all(retargeted_motion.success)
-    assert len(backend.calls) == 200
+    assert len(backend.calls) == 100
+
+
+def test_sequence_runner_reuses_backend_solver_when_available():
+    spec = RobotSpec.from_yaml(G1_29_ROBOT)
+    backend = MockReusableBackend(spec, joint_delta=0.001)
+    solver = NewtonIKRetargetSolver(G1_29_NEWTON, backend=backend)
+    motion = make_canonical_motion(num_frames=5)
+
+    retargeted_motion = SequenceIKRetargetRunner(solver).run(motion)
+
+    assert retargeted_motion.num_frames() == 5
+    assert backend.reusable_builds == 1
+    assert len(backend.reusable_calls) == 5
+    assert backend.calls == []
+    assert retargeted_motion.diagnostics[0]["full_body_tracking"]["diagnostics"]["reused_solver"] is True
 
 
 def test_online_runner_steps_and_resets_state():
@@ -134,7 +188,7 @@ def test_online_runner_steps_and_resets_state():
     second = runner.step(motion, 1)
 
     assert runner.frame_count == 2
-    assert np.allclose(backend.calls[2]["seed"].joint_pos, first.joint_pos)
+    assert np.allclose(backend.calls[1]["seed"].joint_pos, first.joint_pos)
     assert second.frame_idx == 1
 
     runner.reset()

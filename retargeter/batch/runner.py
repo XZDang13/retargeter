@@ -6,6 +6,8 @@ import re
 from pathlib import Path
 from typing import Sequence
 
+from retargeter.progress import ProgressReporter, get_progress
+
 from .manifest import BatchItemRecord, BatchManifest, load_manifest, save_manifest, summarize, update_item
 from .worker import RefineBatchTask, TaskProcessor, process_refine_batch_task
 
@@ -33,9 +35,11 @@ class BatchRefineRunner:
         skip_existing: bool = False,
         overwrite: bool = False,
         dry_run: bool = False,
+        progress: ProgressReporter | None = None,
     ) -> BatchManifest:
         if workers <= 0:
             raise ValueError("workers must be positive.")
+        reporter = get_progress(progress)
         task_list = list(tasks)
         manifest = self._initial_manifest(
             task_list,
@@ -45,12 +49,13 @@ class BatchRefineRunner:
         )
         save_manifest(self.manifest_path, manifest)
         if dry_run:
+            reporter.stage(f"Batch dry run planned {len(task_list)} item(s)")
             return manifest
 
         runnable = [task for task in task_list if self._record_for_task(manifest, task).status == "pending"]
         if workers == 1:
-            return self._run_sequential(manifest, runnable, fail_fast=fail_fast)
-        return self._run_parallel(manifest, runnable, workers=workers, fail_fast=fail_fast)
+            return self._run_sequential(manifest, runnable, fail_fast=fail_fast, progress=reporter)
+        return self._run_parallel(manifest, runnable, workers=workers, fail_fast=fail_fast, progress=reporter)
 
     def _initial_manifest(
         self,
@@ -81,17 +86,27 @@ class BatchRefineRunner:
         tasks: list[RefineBatchTask],
         *,
         fail_fast: bool,
+        progress: ProgressReporter,
     ) -> BatchManifest:
-        for index, task in enumerate(tasks):
-            update_item(manifest, _running_record(task))
-            save_manifest(self.manifest_path, manifest)
-            result = self.task_processor(task)
-            update_item(manifest, result)
-            save_manifest(self.manifest_path, manifest)
-            if fail_fast and _is_blocking_failure(result, allow_invalid=self.allow_invalid):
-                self._skip_remaining(manifest, tasks[index + 1 :], reason="fail_fast")
+        with progress.bar(total=len(tasks), desc="Batch refine", unit="clip") as bar:
+            bar.set_postfix(_progress_postfix(manifest, workers=1), refresh=False)
+            for index, task in enumerate(tasks):
+                update_item(manifest, _running_record(task))
                 save_manifest(self.manifest_path, manifest)
-                break
+                bar.set_postfix(_progress_postfix(manifest, workers=1, current=task), refresh=False)
+                result = self.task_processor(task)
+                update_item(manifest, result)
+                save_manifest(self.manifest_path, manifest)
+                bar.update(1)
+                bar.set_postfix(_progress_postfix(manifest, workers=1), refresh=False)
+                if fail_fast and _is_blocking_failure(result, allow_invalid=self.allow_invalid):
+                    remaining = tasks[index + 1 :]
+                    self._skip_remaining(manifest, remaining, reason="fail_fast")
+                    save_manifest(self.manifest_path, manifest)
+                    if remaining:
+                        bar.update(len(remaining))
+                        bar.set_postfix(_progress_postfix(manifest, workers=1), refresh=False)
+                    break
         return manifest
 
     def _run_parallel(
@@ -101,28 +116,39 @@ class BatchRefineRunner:
         *,
         workers: int,
         fail_fast: bool,
+        progress: ProgressReporter,
     ) -> BatchManifest:
         pending = list(tasks)
         running: dict[concurrent.futures.Future[BatchItemRecord], RefineBatchTask] = {}
         context = multiprocessing.get_context("spawn")
-        with concurrent.futures.ProcessPoolExecutor(max_workers=workers, mp_context=context) as executor:
-            self._submit_until_full(executor, pending, running, manifest, workers)
-            while running:
-                done, _ = concurrent.futures.wait(running, return_when=concurrent.futures.FIRST_COMPLETED)
-                stop = False
-                for future in done:
-                    task = running.pop(future)
-                    result = _future_result_or_failure(future, task)
-                    update_item(manifest, result)
-                    save_manifest(self.manifest_path, manifest)
-                    if fail_fast and _is_blocking_failure(result, allow_invalid=self.allow_invalid):
-                        stop = True
-                        break
-                if stop:
-                    self._finish_after_parallel_fail_fast(manifest, running, pending)
-                    save_manifest(self.manifest_path, manifest)
-                    break
+        with progress.bar(total=len(tasks), desc="Batch refine", unit="clip") as bar:
+            bar.set_postfix(_progress_postfix(manifest, workers=workers), refresh=False)
+            with concurrent.futures.ProcessPoolExecutor(max_workers=workers, mp_context=context) as executor:
                 self._submit_until_full(executor, pending, running, manifest, workers)
+                bar.set_postfix(_progress_postfix(manifest, workers=workers), refresh=False)
+                while running:
+                    done, _ = concurrent.futures.wait(running, return_when=concurrent.futures.FIRST_COMPLETED)
+                    stop = False
+                    for future in done:
+                        task = running.pop(future)
+                        result = _future_result_or_failure(future, task)
+                        update_item(manifest, result)
+                        save_manifest(self.manifest_path, manifest)
+                        bar.update(1)
+                        bar.set_postfix(_progress_postfix(manifest, workers=workers), refresh=False)
+                        if fail_fast and _is_blocking_failure(result, allow_invalid=self.allow_invalid):
+                            stop = True
+                            break
+                    if stop:
+                        remaining = len(running) + len(pending)
+                        self._finish_after_parallel_fail_fast(manifest, running, pending)
+                        save_manifest(self.manifest_path, manifest)
+                        if remaining:
+                            bar.update(remaining)
+                            bar.set_postfix(_progress_postfix(manifest, workers=workers), refresh=False)
+                        break
+                    self._submit_until_full(executor, pending, running, manifest, workers)
+                    bar.set_postfix(_progress_postfix(manifest, workers=workers), refresh=False)
         return manifest
 
     def _submit_until_full(
@@ -186,6 +212,7 @@ def build_refine_batch_tasks(
     mock_frames: int = 120,
     return_vertices: bool = True,
     export_human: bool = True,
+    export_retargeted: bool = False,
     allow_invalid: bool = False,
     preprocess_config: Path | None = None,
     scaler_config: Path | None = None,
@@ -227,6 +254,7 @@ def build_refine_batch_tasks(
                 mock_frames=mock_frames,
                 return_vertices=return_vertices,
                 export_human=export_human,
+                export_retargeted=export_retargeted,
                 allow_invalid=allow_invalid,
                 preprocess_config=preprocess_config,
                 scaler_config=scaler_config,
@@ -312,17 +340,13 @@ def _task_outputs_exist(task: RefineBatchTask) -> bool:
 
 
 def _resume_skips(item: BatchItemRecord, *, allow_invalid: bool) -> bool:
-    if item.status in {"success", "skipped"}:
+    if item.status in {"success", "invalid", "skipped"}:
         return True
-    return bool(allow_invalid and item.status == "invalid")
+    return False
 
 
 def _is_blocking_failure(item: BatchItemRecord, *, allow_invalid: bool) -> bool:
-    if item.status == "failed":
-        return True
-    if item.status == "invalid" and not allow_invalid:
-        return True
-    return False
+    return item.status == "failed"
 
 
 def _future_result_or_failure(
@@ -339,6 +363,25 @@ def _future_result_or_failure(
             error_type=type(exc).__name__,
             error=str(exc),
         )
+
+
+def _progress_postfix(
+    manifest: BatchManifest,
+    *,
+    workers: int,
+    current: RefineBatchTask | None = None,
+) -> dict[str, int | str]:
+    summary = summarize(manifest)
+    postfix: dict[str, int | str] = {
+        "ok": summary.get("success", 0),
+        "invalid": summary.get("invalid", 0),
+        "failed": summary.get("failed", 0),
+        "skipped": summary.get("skipped", 0),
+        "workers": int(workers),
+    }
+    if current is not None:
+        postfix["item"] = _safe_batch_item_name(current.input_path)
+    return postfix
 
 
 def _task_key(task: RefineBatchTask) -> tuple[str, str]:

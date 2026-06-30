@@ -13,7 +13,7 @@ Run commands from the repository root with `PYTHONPATH=.`.
 Core dependencies:
 
 ```bash
-python -m pip install numpy scipy pyyaml matplotlib pytest
+python -m pip install numpy scipy pyyaml matplotlib pytest tqdm
 ```
 
 Real SMPL/SMPL-X input requires:
@@ -79,19 +79,18 @@ Outputs:
 outputs/05_05_refine/final_motion.npz
 outputs/05_05_refine/final_meta.yaml
 outputs/05_05_refine/final_quality.json
-outputs/05_05_refine/retargeted_motion.npz
-outputs/05_05_refine/retargeted_meta.yaml
-outputs/05_05_refine/retargeted_quality.json
 outputs/05_05_refine/human.npz
 ```
 
-`final_motion.npz` is the refinement training-data product. IK retarget files are kept for audit and comparison. `human.npz` is exported by default for real SMPL/SMPL-X inputs with mesh vertices; use `--no-human-output` to skip it.
+`final_motion.npz` is the refinement training-data product. IK retarget files are debug output only; pass `--save-retargeted` to write `retargeted_motion.npz`, `retargeted_meta.yaml`, and `retargeted_quality.json`. `human.npz` is exported by default for real SMPL/SMPL-X inputs with mesh vertices; use `--no-human-output` to skip it.
 
-Refine fails by default if `RefinementQualityReport.valid` is false. Use `--allow-invalid` to keep invalid outputs for debugging.
+Refine rejects invalid motions by default instead of exiting with an error. Rejected refined outputs are written under `rejected/`, while top-level `final_motion.npz` is reserved for accepted training data. Use `--allow-invalid` to write invalid final outputs in the normal top-level layout for debugging.
 
-Refinement quality includes a post-refine physical feasibility gate for joint limits, velocity, acceleration, jerk, foot penetration/floating, support availability, and conservative base-of-support diagnostics. Pelvis height is reported but not a default rejection gate. Support availability is on by default, but it rejects only long continuous unsupported intervals, not total unsupported fraction, so jumps and kicks are not rejected solely for contact-light phases. Override thresholds with the `physical_feasibility` section in `--refinement-config`.
+Refinement quality includes a post-refine physical feasibility gate for joint limits, velocity, per-frame robust-percentile acceleration/jerk plus sustained dynamics violations, foot penetration/floating, support availability, and conservative base-of-support diagnostics. Pelvis height is reported but not a default rejection gate. Support availability is on by default, but it rejects only long continuous unsupported intervals, not total unsupported fraction, so jumps and kicks are not rejected solely for contact-light phases. Override thresholds with the `physical_feasibility` section in `--refinement-config`.
 
 `--fps` means input/source FPS override. `--target-fps` resamples SMPL/SMPL-X parameters before FK and controls downstream IK retarget/refinement FPS.
+
+Refine progress uses `tqdm` on stderr. `--progress auto` is the default and shows bars in interactive terminals; use `--progress on` to force progress in logs or `--progress off` for quiet scripting.
 
 Batch refine runs the same single-clip pipeline for many inputs and writes one standard refine directory per clip. Parallel batch mode is clip-level multiprocessing; each worker creates its own pipeline instance.
 
@@ -119,12 +118,12 @@ The restartable manifest is written incrementally to `outputs/refine_batch/batch
 ### Viewer
 
 Viewer mode replays outputs from online or refine mode. It can take an output directory or a single motion `.npz`.
+Interactive `gl` and `viser` replay at real speed by default; `file` and `usd` export as fast as possible unless `--realtime 1` is passed.
 
 ```bash
 PYTHONPATH=. python -m retargeter.cli.viewer \
   --input outputs/05_05_refine \
-  --viewer gl \
-  --realtime 1
+  --viewer gl
 ```
 
 Directory input priority is:
@@ -140,8 +139,7 @@ PYTHONPATH=. python -m retargeter.cli.viewer \
   --input outputs/05_05_refine/final_motion.npz \
   --human outputs/05_05_refine/human.npz \
   --viewer gl \
-  --human-offset 0,1.25,0 \
-  --realtime 1
+  --human-offset 0,1.25,0
 ```
 
 Viewer choices:
@@ -205,6 +203,10 @@ retargeter/scale/configs/g1_29_ik_targets.yaml
 retargeter/scale/configs/g1_23_scaler.yaml
 retargeter/scale/configs/g1_23_ik_targets.yaml
 ```
+
+Newton IK retargeting is single-pass: each frame runs one `full_body_tracking` solve, warm-started
+from the previous frame when available. The old coarse-plus-tracking pass schedule is no longer
+supported by the solver.
 
 ## Debug Preprocessing
 

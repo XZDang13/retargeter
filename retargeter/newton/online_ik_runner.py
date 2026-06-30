@@ -35,14 +35,12 @@ class OnlineIKRetargetRunner:
 
     def step_targets(
         self,
-        coarse_targets: IKTargetSet,
         tracking_targets: IKTargetSet,
         *,
         fps: float,
         frame_idx: int | None = None,
     ) -> IKRetargetFrameResult:
         result = self.solver.solve_target_sets(
-            coarse_targets,
             tracking_targets,
             frame_idx=self.frame_count if frame_idx is None else int(frame_idx),
             fps=float(fps),
