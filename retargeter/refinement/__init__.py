@@ -11,7 +11,7 @@ from .losses import (
     total_refinement_loss,
 )
 from .quality import RefinementQualityReport, evaluate_refinement_quality
-from .refiner import RefinedMotion, TorchMotionRefiner, run_refinement
+from .refiner import RefinedMotion, TorchMotionRefiner, run_refinement, run_refinement_batch
 
 __all__ = [
     "RefinedMotion",
@@ -25,6 +25,7 @@ __all__ = [
     "load_refined_motion_npz",
     "motion_fidelity_loss",
     "run_refinement",
+    "run_refinement_batch",
     "skating_loss",
     "smoothness_loss",
     "total_refinement_loss",

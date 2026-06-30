@@ -197,6 +197,28 @@ class NewtonBackend:
         """Create a reusable single-problem Newton IK solver for stable objective layouts."""
         return ReusableNewtonIKSolver(self, objectives, settings)
 
+    def solve_ik_batch(
+        self,
+        seed_states: list[IKState],
+        objectives_by_problem: list[list[IKObjectiveDescriptor]],
+        settings: NewtonSolveSettings,
+    ) -> list[BackendSolveResult]:
+        """Solve multiple same-layout IK problems in one Newton solver step."""
+        self._ensure_loaded()
+        return ReusableNewtonIKBatchSolver(self, objectives_by_problem, settings).solve(
+            seed_states,
+            objectives_by_problem,
+            settings,
+        )
+
+    def create_reusable_batch_solver(
+        self,
+        objectives_by_problem: list[list[IKObjectiveDescriptor]],
+        settings: NewtonSolveSettings,
+    ) -> "ReusableNewtonIKBatchSolver":
+        """Create a reusable multi-problem Newton IK solver for stable objective layouts."""
+        return ReusableNewtonIKBatchSolver(self, objectives_by_problem, settings)
+
     def forward_kinematics(self, state: IKState) -> RobotBodyState:
         self._ensure_loaded()
         assert self._newton is not None and self._wp is not None and self._model is not None
@@ -321,6 +343,96 @@ class NewtonBackend:
                     self._model.joint_limit_lower,
                     self._model.joint_limit_upper,
                     weight=float(objective.weight),
+                )
+                native.append(native_objective)
+                bindings.append(_NativeObjectiveBinding(descriptor_index, objective.kind, native_objective))
+            elif objective.kind in {"posture", "smooth", "damping"}:
+                from .joint_objectives import IKJointTargetObjective
+
+                target = np.asarray(objective.target, dtype=np.float64)
+                native_objective = IKJointTargetObjective(
+                    target[None, :],
+                    weight=float(objective.weight),
+                    coord_start=7 if self.robot_spec.floating_base else 0,
+                    dof_start=6 if self.robot_spec.floating_base else 0,
+                )
+                native.append(native_objective)
+                bindings.append(_NativeObjectiveBinding(descriptor_index, objective.kind, native_objective))
+        return native, bindings
+
+    def _build_bound_native_objectives_batch(
+        self,
+        objectives_by_problem: list[list[IKObjectiveDescriptor]],
+    ) -> tuple[list[Any], list[_NativeObjectiveBinding]]:
+        assert self._newton is not None and self._wp is not None and self._model is not None
+        if not objectives_by_problem:
+            raise ValueError("objectives_by_problem must be non-empty.")
+        first = objectives_by_problem[0]
+        layout = _native_objective_layout_key(first)
+        for objectives in objectives_by_problem:
+            if _native_objective_layout_key(objectives) != layout:
+                raise ValueError("All batched IK objective layouts must match.")
+            _validate_shared_objective_weights(first, objectives)
+
+        native = []
+        bindings: list[_NativeObjectiveBinding] = []
+        for descriptor_index, objective in enumerate(first):
+            if objective.kind == "position":
+                body_index = self._body_name_to_newton_index[objective.body_name or ""]
+                local_pos = (
+                    np.zeros(3, dtype=np.float64)
+                    if objective.body_local_pos is None
+                    else np.asarray(objective.body_local_pos, dtype=np.float64)
+                )
+                targets = np.stack(
+                    [np.asarray(objectives[descriptor_index].target, dtype=np.float64) for objectives in objectives_by_problem],
+                    axis=0,
+                )
+                native_objective = self._newton.ik.IKObjectivePosition(
+                    body_index,
+                    self._wp.vec3(float(local_pos[0]), float(local_pos[1]), float(local_pos[2])),
+                    self._wp.array(targets.astype(np.float32), dtype=self._wp.vec3),
+                    weight=float(objective.weight),
+                )
+                native.append(native_objective)
+                bindings.append(_NativeObjectiveBinding(descriptor_index, objective.kind, native_objective))
+            elif objective.kind == "rotation":
+                body_index = self._body_name_to_newton_index[objective.body_name or ""]
+                targets = np.stack(
+                    [
+                        normalize_quat_xyzw(np.asarray(objectives[descriptor_index].target, dtype=np.float64))
+                        for objectives in objectives_by_problem
+                    ],
+                    axis=0,
+                )
+                native_objective = self._newton.ik.IKObjectiveRotation(
+                    body_index,
+                    self._wp.quat(0.0, 0.0, 0.0, 1.0),
+                    self._wp.array(targets.astype(np.float32), dtype=self._wp.vec4),
+                    weight=float(objective.weight),
+                )
+                native.append(native_objective)
+                bindings.append(_NativeObjectiveBinding(descriptor_index, objective.kind, native_objective))
+            elif objective.kind == "joint_limit":
+                native_objective = self._newton.ik.IKObjectiveJointLimit(
+                    self._model.joint_limit_lower,
+                    self._model.joint_limit_upper,
+                    weight=float(objective.weight),
+                )
+                native.append(native_objective)
+                bindings.append(_NativeObjectiveBinding(descriptor_index, objective.kind, native_objective))
+            elif objective.kind in {"posture", "smooth", "damping"}:
+                from .joint_objectives import IKJointTargetObjective
+
+                targets = np.stack(
+                    [np.asarray(objectives[descriptor_index].target, dtype=np.float64) for objectives in objectives_by_problem],
+                    axis=0,
+                )
+                native_objective = IKJointTargetObjective(
+                    targets,
+                    weight=float(objective.weight),
+                    coord_start=7 if self.robot_spec.floating_base else 0,
+                    dof_start=6 if self.robot_spec.floating_base else 0,
                 )
                 native.append(native_objective)
                 bindings.append(_NativeObjectiveBinding(descriptor_index, objective.kind, native_objective))
@@ -491,6 +603,164 @@ class ReusableNewtonIKSolver:
                     0,
                     wp.quat(float(target[0]), float(target[1]), float(target[2]), float(target[3])),
                 )
+            elif binding.kind in {"posture", "smooth", "damping"}:
+                binding.native.set_target(0, np.asarray(objective.target, dtype=np.float64))
+                binding.native.set_weight(float(objective.weight))
+
+
+class ReusableNewtonIKBatchSolver:
+    """Reusable multi-problem Newton IK solver for a stable objective layout."""
+
+    def __init__(
+        self,
+        backend: NewtonBackend,
+        objectives_by_problem: list[list[IKObjectiveDescriptor]],
+        settings: NewtonSolveSettings,
+    ):
+        backend._ensure_loaded()
+        assert backend._newton is not None and backend._wp is not None and backend._model is not None
+        _validate_objective_batch(backend.robot_spec, objectives_by_problem)
+
+        self._backend = backend
+        self._problem_count = len(objectives_by_problem)
+        self._settings_key = _solver_reuse_settings_key(settings)
+        self._layout_key = _native_objective_layout_key(objectives_by_problem[0])
+        self._weight_key = _native_objective_weight_key(objectives_by_problem[0])
+        self._native_objectives, self._bindings = backend._build_bound_native_objectives_batch(objectives_by_problem)
+        self._solver = None
+        if self._native_objectives:
+            self._solver = backend._newton.ik.IKSolver(
+                backend._model,
+                self._problem_count,
+                self._native_objectives,
+                optimizer=settings.optimizer,
+                jacobian_mode=settings.jacobian_mode,
+                lambda_initial=settings.lambda_initial,
+            )
+
+    def compatible(
+        self,
+        objectives_by_problem: list[list[IKObjectiveDescriptor]],
+        settings: NewtonSolveSettings,
+    ) -> bool:
+        if len(objectives_by_problem) != self._problem_count or not objectives_by_problem:
+            return False
+        first = objectives_by_problem[0]
+        if self._settings_key != _solver_reuse_settings_key(settings):
+            return False
+        if self._layout_key != _native_objective_layout_key(first):
+            return False
+        if self._weight_key != _native_objective_weight_key(first):
+            return False
+        return all(
+            _native_objective_layout_key(objectives) == self._layout_key
+            and _native_objective_weight_key(objectives) == self._weight_key
+            for objectives in objectives_by_problem
+        )
+
+    def solve(
+        self,
+        seed_states: list[IKState],
+        objectives_by_problem: list[list[IKObjectiveDescriptor]],
+        settings: NewtonSolveSettings,
+    ) -> list[BackendSolveResult]:
+        backend = self._backend
+        assert backend._wp is not None
+        if len(seed_states) != self._problem_count:
+            raise ValueError(f"Expected {self._problem_count} seed states, got {len(seed_states)}.")
+        _validate_objective_batch(backend.robot_spec, objectives_by_problem)
+        if not self.compatible(objectives_by_problem, settings):
+            raise ValueError("ReusableNewtonIKBatchSolver objective layout, weights, or settings changed.")
+
+        seeds = [backend._apply_seed_bias(seed, objectives) for seed, objectives in zip(seed_states, objectives_by_problem)]
+        diagnostics = {
+            "objective_count": len(objectives_by_problem[0]) if objectives_by_problem else 0,
+            "native_objective_count": len(self._native_objectives),
+            "regularization_seed_bias": True,
+            "reused_solver": True,
+            "batch_problem_count": self._problem_count,
+        }
+
+        if self._solver is None:
+            return [
+                BackendSolveResult(
+                    state=seed,
+                    success=True,
+                    cost=0.0,
+                    iterations=0,
+                    diagnostics=dict(diagnostics),
+                )
+                for seed in seeds
+            ]
+
+        full_q = np.stack([backend._state_to_full_q(seed) for seed in seeds], axis=0)
+        joint_q_in = backend._wp.array(full_q.astype(np.float32), dtype=backend._wp.float32)
+        joint_q_out = backend._wp.array(full_q.astype(np.float32), dtype=backend._wp.float32)
+
+        try:
+            self._update_native_objectives(objectives_by_problem)
+            self._solver.step(joint_q_in, joint_q_out, iterations=int(settings.iterations), step_size=float(settings.step_size))
+            solved_full_q = joint_q_out.numpy().astype(np.float64)
+            costs = np.asarray(self._solver.costs.numpy()).reshape(-1)
+            results: list[BackendSolveResult] = []
+            for problem_index in range(self._problem_count):
+                item_diagnostics = dict(diagnostics)
+                item_diagnostics["batch_problem_index"] = problem_index
+                cost = float(costs[problem_index]) if costs.size > problem_index else (float(np.min(costs)) if costs.size else None)
+                results.append(
+                    BackendSolveResult(
+                        state=backend._full_q_to_state(solved_full_q[problem_index]),
+                        success=True,
+                        cost=cost,
+                        iterations=int(settings.iterations),
+                        diagnostics=item_diagnostics,
+                    )
+                )
+            return results
+        except Exception as exc:  # pragma: no cover - exercised only with real Newton failures.
+            failed = []
+            for problem_index, seed in enumerate(seeds):
+                item_diagnostics = dict(diagnostics)
+                item_diagnostics["batch_problem_index"] = problem_index
+                item_diagnostics["error"] = f"{type(exc).__name__}: {exc}"
+                failed.append(
+                    BackendSolveResult(
+                        state=seed,
+                        success=False,
+                        cost=None,
+                        iterations=0,
+                        diagnostics=item_diagnostics,
+                    )
+                )
+            return failed
+
+    def _update_native_objectives(self, objectives_by_problem: list[list[IKObjectiveDescriptor]]) -> None:
+        wp = self._backend._wp
+        assert wp is not None
+        for binding in self._bindings:
+            first = objectives_by_problem[0][binding.descriptor_index]
+            binding.native.weight = float(first.weight)
+            if binding.kind == "position":
+                for problem_index, objectives in enumerate(objectives_by_problem):
+                    target = np.asarray(objectives[binding.descriptor_index].target, dtype=np.float64)
+                    binding.native.set_target_position(
+                        problem_index,
+                        wp.vec3(float(target[0]), float(target[1]), float(target[2])),
+                    )
+            elif binding.kind == "rotation":
+                for problem_index, objectives in enumerate(objectives_by_problem):
+                    target = normalize_quat_xyzw(np.asarray(objectives[binding.descriptor_index].target, dtype=np.float64))
+                    binding.native.set_target_rotation(
+                        problem_index,
+                        wp.quat(float(target[0]), float(target[1]), float(target[2]), float(target[3])),
+                    )
+            elif binding.kind in {"posture", "smooth", "damping"}:
+                binding.native.set_weight(float(first.weight))
+                for problem_index, objectives in enumerate(objectives_by_problem):
+                    binding.native.set_target(
+                        problem_index,
+                        np.asarray(objectives[binding.descriptor_index].target, dtype=np.float64),
+                    )
 
 
 def _solver_reuse_settings_key(settings: NewtonSolveSettings) -> tuple[str, str, float]:
@@ -513,7 +783,39 @@ def _native_objective_layout_key(objectives: list[IKObjectiveDescriptor]) -> tup
             layout.append((objective.kind, objective.body_name, objective.semantic_name))
         elif objective.kind == "joint_limit":
             layout.append((objective.kind,))
+        elif objective.kind in {"posture", "smooth", "damping"}:
+            layout.append((objective.kind,))
     return tuple(layout)
+
+
+def _native_objective_weight_key(objectives: list[IKObjectiveDescriptor]) -> tuple[float, ...]:
+    return tuple(round(float(objective.weight), 10) for objective in objectives)
+
+
+def _validate_objective_batch(
+    robot_spec: RobotSpec,
+    objectives_by_problem: list[list[IKObjectiveDescriptor]],
+) -> None:
+    if not objectives_by_problem:
+        raise ValueError("objectives_by_problem must be non-empty.")
+    first = objectives_by_problem[0]
+    layout = _native_objective_layout_key(first)
+    weights = _native_objective_weight_key(first)
+    for objectives in objectives_by_problem:
+        for objective in objectives:
+            objective.validate(robot_spec)
+        if _native_objective_layout_key(objectives) != layout:
+            raise ValueError("All batched IK objective layouts must match.")
+        if _native_objective_weight_key(objectives) != weights:
+            raise ValueError("All batched IK objective weights must match.")
+
+
+def _validate_shared_objective_weights(
+    expected: list[IKObjectiveDescriptor],
+    actual: list[IKObjectiveDescriptor],
+) -> None:
+    if _native_objective_weight_key(expected) != _native_objective_weight_key(actual):
+        raise ValueError("All batched IK objective weights must match.")
 
 
 def _float_tuple(value: np.ndarray | None, size: int) -> tuple[float, ...] | None:

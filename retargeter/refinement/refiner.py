@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 import copy
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
 import torch
 
-from retargeter.newton import RobotSpec, RetargetedMotion, TorchRobotFK
+from retargeter.newton import RobotSpec, RetargetedMotion, TorchRobotFK, TorchRobotFKResult
 from retargeter.preprocess import PreprocessResult
 from retargeter.progress import ProgressReporter, get_progress
 
@@ -240,6 +240,262 @@ def run_refinement(
     progress: ProgressReporter | None = None,
 ) -> RefinedMotion:
     return TorchMotionRefiner(robot_spec, torch_fk, config=config, log_fn=log_fn, progress=progress).refine(retargeted, preprocess_result)
+
+
+def run_refinement_batch(
+    retargeted: Sequence[RetargetedMotion],
+    preprocess_results: Sequence[PreprocessResult],
+    robot_spec: RobotSpec,
+    torch_fk: TorchRobotFK,
+    config: Mapping[str, Any] | None = None,
+    log_fn: Callable[[dict[str, float | int | str]], None] | None = None,
+    progress: ProgressReporter | None = None,
+) -> list[RefinedMotion]:
+    motions = list(retargeted)
+    preprocess = list(preprocess_results)
+    if not motions:
+        return []
+    if len(motions) != len(preprocess):
+        raise ValueError("retargeted and preprocess_results must have the same length.")
+    if len(motions) == 1:
+        return [run_refinement(motions[0], preprocess[0], robot_spec, torch_fk, config=config, log_fn=log_fn, progress=progress)]
+    return BatchedTorchMotionRefiner(robot_spec, torch_fk, config=config, log_fn=log_fn, progress=progress).refine_batch(motions, preprocess)
+
+
+def _validate_batch_inputs(
+    retargeted: Sequence[RetargetedMotion],
+    preprocess_results: Sequence[PreprocessResult],
+    robot_spec: RobotSpec,
+) -> None:
+    if len(retargeted) != len(preprocess_results):
+        raise ValueError("retargeted and preprocess_results must have the same length.")
+    if not retargeted:
+        raise ValueError("retargeted batch must be non-empty.")
+    joint_names = list(retargeted[0].joint_names)
+    body_names = list(retargeted[0].body_names)
+    for motion, preprocess_result in zip(retargeted, preprocess_results):
+        _validate_inputs(motion, preprocess_result, robot_spec)
+        if motion.joint_names != joint_names:
+            raise ValueError("All batched RetargetedMotion items must have the same joint_names.")
+        if motion.body_names != body_names:
+            raise ValueError("All batched RetargetedMotion items must have the same body_names.")
+
+
+def _padded_tensor(
+    arrays: Sequence[np.ndarray],
+    max_frames: int,
+    *,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    first = np.asarray(arrays[0])
+    output_shape = (len(arrays), int(max_frames)) + tuple(first.shape[1:])
+    out = torch.zeros(output_shape, dtype=dtype, device=device)
+    for index, value in enumerate(arrays):
+        arr = np.asarray(value)
+        if arr.shape[1:] != first.shape[1:]:
+            raise ValueError(f"Cannot batch arrays with trailing shapes {first.shape[1:]} and {arr.shape[1:]}.")
+        out[index, : arr.shape[0]] = torch.as_tensor(arr, dtype=dtype, device=device)
+    return out
+
+
+def _valid_mask(lengths: Sequence[int], max_frames: int, *, device: torch.device) -> torch.Tensor:
+    frame_index = torch.arange(int(max_frames), device=device).reshape(1, -1)
+    length_tensor = torch.as_tensor([int(length) for length in lengths], dtype=torch.long, device=device).reshape(-1, 1)
+    return frame_index < length_tensor
+
+
+class BatchedTorchMotionRefiner(TorchMotionRefiner):
+    def refine_batch(
+        self,
+        retargeted: Sequence[RetargetedMotion],
+        preprocess_results: Sequence[PreprocessResult],
+    ) -> list[RefinedMotion]:
+        motions = list(retargeted)
+        preprocess = list(preprocess_results)
+        _validate_batch_inputs(motions, preprocess, self.robot_spec)
+        iterations = int(self.refiner_config["iterations"])
+        lr = float(self.refiner_config["lr"])
+        log_interval = int(self.refiner_config["log_interval"])
+        max_root_delta = float(self.refiner_config["max_root_delta"])
+        max_joint_delta = float(self.refiner_config["max_joint_delta"])
+
+        lengths = [motion.num_frames() for motion in motions]
+        batch_size = len(motions)
+        max_frames = max(lengths)
+        retargeted_root = _padded_tensor([motion.root_pos_w for motion in motions], max_frames, device=self.device, dtype=self.dtype)
+        retargeted_quat = _padded_tensor([motion.root_quat_xyzw for motion in motions], max_frames, device=self.device, dtype=self.dtype)
+        retargeted_q = _padded_tensor([motion.joint_pos for motion in motions], max_frames, device=self.device, dtype=self.dtype)
+        valid_mask = _valid_mask(lengths, max_frames, device=self.device)
+
+        raw_root_delta = torch.nn.Parameter(torch.zeros_like(retargeted_root))
+        raw_joint_delta = torch.nn.Parameter(torch.zeros_like(retargeted_q))
+        optimizer = torch.optim.Adam([raw_root_delta, raw_joint_delta], lr=lr)
+        contacts = [_contact_score(item) for item in preprocess]
+        ground_heights = [_ground_height(item) for item in preprocess]
+        loss_curve: list[dict[str, float | int | str]] = []
+
+        def evaluate() -> tuple[torch.Tensor, dict[str, torch.Tensor], dict[str, Any]]:
+            states = _refined_tensors(
+                retargeted_root,
+                retargeted_quat,
+                retargeted_q,
+                raw_root_delta,
+                raw_joint_delta,
+                max_root_delta=max_root_delta,
+                max_joint_delta=max_joint_delta,
+            )
+            flat_root = states["root_pos"].reshape(batch_size * max_frames, 3)
+            flat_quat = states["root_quat"].reshape(batch_size * max_frames, 4)
+            flat_joint = states["joint_pos"].reshape(batch_size * max_frames, self.robot_spec.num_dofs)
+            flat_fk = self.torch_fk(flat_root, flat_quat, flat_joint)
+            fk_body_pos = flat_fk.body_pos_w.reshape(batch_size, max_frames, len(flat_fk.body_names), 3)
+            fk_body_quat = flat_fk.body_quat_xyzw.reshape(batch_size, max_frames, len(flat_fk.body_names), 4)
+
+            losses: list[torch.Tensor] = []
+            metrics_by_key: dict[str, list[torch.Tensor]] = {}
+            clip_losses: list[torch.Tensor] = []
+            clip_metrics: list[dict[str, torch.Tensor]] = []
+            for item_index, motion in enumerate(motions):
+                frames = lengths[item_index]
+                clip_fk = TorchRobotFKResult(
+                    body_names=list(flat_fk.body_names),
+                    body_pos_w=fk_body_pos[item_index, :frames],
+                    body_quat_xyzw=fk_body_quat[item_index, :frames],
+                )
+                clip_joint_pos = states["joint_pos"][item_index, :frames]
+                clip_root_pos = states["root_pos"][item_index, :frames]
+                clip_joint_vel = _joint_velocity(clip_joint_pos, float(motion.fps))
+                clip_root_delta = states["root_delta"][item_index, :frames]
+                clip_joint_delta = states["joint_delta"][item_index, :frames]
+                clip_loss, clip_metric = total_refinement_loss(
+                    motion,
+                    clip_fk,
+                    clip_joint_pos,
+                    clip_root_pos,
+                    clip_joint_vel,
+                    clip_root_delta,
+                    clip_joint_delta,
+                    contacts[item_index],
+                    ground_heights[item_index],
+                    self.robot_spec,
+                    self.config,
+                )
+                losses.append(clip_loss)
+                clip_losses.append(clip_loss.detach().clone())
+                clip_metrics.append({key: value.detach().clone() for key, value in clip_metric.items()})
+                for key, value in clip_metric.items():
+                    metrics_by_key.setdefault(key, []).append(value)
+
+            total_loss = torch.stack(losses).mean()
+            metrics = {key: torch.stack(values).mean().detach().clone() for key, values in metrics_by_key.items()}
+            metrics["loss"] = total_loss.detach().clone()
+            return total_loss, metrics, {
+                **states,
+                "fk_body_pos": fk_body_pos,
+                "fk_body_quat": fk_body_quat,
+                "fk_body_names": list(flat_fk.body_names),
+                "clip_losses": clip_losses,
+                "clip_metrics": clip_metrics,
+                "valid_mask": valid_mask,
+            }
+
+        with torch.no_grad():
+            initial_loss, initial_metrics, initial_states = evaluate()
+        initial_clip_losses = [loss.detach().clone() for loss in initial_states["clip_losses"]]
+        _record_loss(loss_curve, 0, "adam", initial_loss, initial_metrics, self.log_fn)
+
+        with self.progress.bar(total=iterations, desc="Batch Refine Adam", unit="iter") as bar:
+            for iteration in range(1, iterations + 1):
+                optimizer.zero_grad()
+                loss, metrics, _ = evaluate()
+                loss.backward()
+                optimizer.step()
+                if _should_log(iteration, iterations, log_interval):
+                    _record_loss(loss_curve, iteration, "adam", loss, metrics, self.log_fn)
+                    bar.set_postfix({"loss": f"{float(loss.detach().cpu()):.4g}"}, refresh=False)
+                bar.update(1)
+
+        if bool(self.refiner_config["lbfgs_enabled"]):
+            lbfgs = torch.optim.LBFGS(
+                [raw_root_delta, raw_joint_delta],
+                lr=float(self.refiner_config["lbfgs_lr"]),
+                max_iter=int(self.refiner_config["lbfgs_max_iter"]),
+                line_search_fn=self.refiner_config["lbfgs_line_search_fn"],
+            )
+
+            def closure() -> torch.Tensor:
+                lbfgs.zero_grad()
+                closure_loss, _, _ = evaluate()
+                closure_loss.backward()
+                return closure_loss
+
+            with self.progress.bar(total=1, desc="Batch Refine LBFGS", unit="phase") as bar:
+                lbfgs.step(closure)
+                bar.update(1)
+            with torch.no_grad():
+                lbfgs_loss, lbfgs_metrics, _ = evaluate()
+            _record_loss(loss_curve, iterations, "lbfgs", lbfgs_loss, lbfgs_metrics, self.log_fn)
+
+        with torch.no_grad():
+            final_loss, final_metrics, final_states = evaluate()
+
+        outputs: list[RefinedMotion] = []
+        for item_index, motion in enumerate(motions):
+            frames = lengths[item_index]
+            root_pos_t = final_states["root_pos"][item_index, :frames]
+            root_quat_t = final_states["root_quat"][item_index, :frames]
+            joint_pos_t = final_states["joint_pos"][item_index, :frames]
+            root_delta_t = final_states["root_delta"][item_index, :frames]
+            joint_delta_t = final_states["joint_delta"][item_index, :frames]
+            joint_vel_t = _joint_velocity_full(joint_pos_t, float(motion.fps))
+            root_delta = _to_numpy(root_delta_t)
+            joint_delta = _to_numpy(joint_delta_t)
+            joint_vel = _to_numpy(joint_vel_t)
+            quality_metrics = _quality_metrics(
+                initial_clip_losses[item_index],
+                final_states["clip_losses"][item_index],
+                final_states["clip_metrics"][item_index],
+                root_delta,
+                joint_delta,
+                joint_vel,
+                contact_available=preprocess[item_index].contact is not None,
+                iteration_count=iterations,
+                lbfgs_enabled=bool(self.refiner_config["lbfgs_enabled"]),
+            )
+            quality_metrics["batch_size"] = batch_size
+            quality_metrics["batch_valid_frame_count"] = int(valid_mask[item_index].sum().detach().cpu())
+            item_loss_curve = [dict(record, batch_index=item_index, batch_size=batch_size) for record in loss_curve]
+            refined = RefinedMotion(
+                fps=float(motion.fps),
+                robot=motion.robot,
+                joint_names=list(motion.joint_names),
+                root_pos_w=_to_numpy(root_pos_t),
+                root_quat_xyzw=_to_numpy(root_quat_t),
+                joint_pos=_to_numpy(joint_pos_t),
+                joint_vel=joint_vel,
+                body_names=list(final_states["fk_body_names"]),
+                body_pos_w=_to_numpy(final_states["fk_body_pos"][item_index, :frames]),
+                body_quat_xyzw=_to_numpy(final_states["fk_body_quat"][item_index, :frames]),
+                root_delta=root_delta,
+                joint_delta=joint_delta,
+                loss_curve=item_loss_curve,
+                quality_metrics=quality_metrics,
+                metadata={
+                    "source": "BatchedTorchMotionRefiner",
+                    "retargeted_robot": motion.robot,
+                    "config": copy.deepcopy(self.config),
+                    "refiner_config": dict(self.refiner_config),
+                    "ground_height": float(ground_heights[item_index]),
+                    "contact_available": preprocess[item_index].contact is not None,
+                    "batch_size": batch_size,
+                    "batch_index": item_index,
+                },
+            )
+            refined.validate()
+            outputs.append(refined)
+        return outputs
+
 
 def _validate_inputs(retargeted: RetargetedMotion, preprocess_result: PreprocessResult, robot_spec: RobotSpec) -> None:
     retargeted.validate()

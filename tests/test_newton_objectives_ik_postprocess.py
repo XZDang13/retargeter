@@ -7,6 +7,8 @@ import pytest
 
 from conftest import make_canonical_motion
 from retargeter.newton import RobotSpec, build_regularization_objectives, build_target_objectives
+from retargeter.newton.newton_backend import NewtonBackend, _native_objective_layout_key
+from retargeter.newton.objectives import IKObjectiveDescriptor
 from retargeter.newton.postprocess import apply_ik_postprocess, clamp_joint_limits, clamp_joint_velocity
 from retargeter.scale import BodyIKTarget, IKTargetSet, IKTargetBuilder
 
@@ -92,6 +94,24 @@ def test_regularization_objectives_include_joint_limit_posture_and_smooth():
 
     assert [descriptor.kind for descriptor in descriptors] == ["joint_limit", "posture", "smooth"]
     assert np.allclose(descriptors[-1].target, previous)
+
+
+def test_newton_backend_binds_regularization_as_native_objectives():
+    pytest.importorskip("newton")
+    pytest.importorskip("warp")
+    spec = RobotSpec.from_yaml(G1_29_ROBOT)
+    backend = NewtonBackend(spec)
+    backend._ensure_loaded()
+    descriptors = [
+        IKObjectiveDescriptor(kind="posture", weight=0.05, target=spec.default_joint_pos.copy()),
+        IKObjectiveDescriptor(kind="smooth", weight=5.5, target=np.full(spec.num_dofs, 0.1)),
+    ]
+
+    native, bindings = backend._build_bound_native_objectives(descriptors)
+
+    assert [binding.kind for binding in bindings] == ["posture", "smooth"]
+    assert [objective.residual_dim() for objective in native] == [spec.num_dofs, spec.num_dofs]
+    assert _native_objective_layout_key(descriptors) == (("posture",), ("smooth",))
 
 
 def test_joint_limit_and_velocity_clamps_are_deterministic():

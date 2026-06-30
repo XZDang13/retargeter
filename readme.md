@@ -82,7 +82,7 @@ outputs/05_05_refine/final_quality.json
 outputs/05_05_refine/human.npz
 ```
 
-`final_motion.npz` is the refinement training-data product. IK retarget files are debug output only; pass `--save-retargeted` to write `retargeted_motion.npz`, `retargeted_meta.yaml`, and `retargeted_quality.json`. `human.npz` is exported by default for real SMPL/SMPL-X inputs with mesh vertices; use `--no-human-output` to skip it.
+`final_motion.npz` is the refinement training-data product. IK retarget files are debug output only; pass `--save-retargeted` to write `retargeted_motion.npz`, `retargeted_meta.yaml`, and `retargeted_quality.json`. `human.npz` is exported by default with canonical body motion and contact data; mesh fields are included only when vertices are available. Use `--no-vertices` to omit mesh data and `--no-human-output` to skip `human.npz` entirely.
 
 Refine rejects invalid motions by default instead of exiting with an error. Rejected refined outputs are written under `rejected/`, while top-level `final_motion.npz` is reserved for accepted training data. Use `--allow-invalid` to write invalid final outputs in the normal top-level layout for debugging.
 
@@ -92,28 +92,30 @@ Refinement quality includes a post-refine physical feasibility gate for joint li
 
 Refine progress uses `tqdm` on stderr. `--progress auto` is the default and shows bars in interactive terminals; use `--progress on` to force progress in logs or `--progress off` for quiet scripting.
 
-Batch refine runs the same single-clip pipeline for many inputs and writes one standard refine directory per clip. Parallel batch mode is clip-level multiprocessing; each worker creates its own pipeline instance.
+Batch refine writes one standard refine directory per clip. By default it uses native solver-level microbatches for Newton IK and Torch refinement while keeping quality, export, and manifest records per clip. Use `--batch-size` to control the native IK/refine microbatch size, and `--preprocess-workers` to fan out SMPL/SMPL-X loading, resampling, FK, contact, and `human.npz` export before each microbatch. Pass `--no-native-batch` with `--workers` only when you want the legacy per-item multiprocessing wrapper.
 
 ```bash
 PYTHONPATH=. python -m retargeter.cli.refine \
   --input-dir test_data \
-  --input-pattern '*.npz' \
   --recursive \
   --model-type smplx \
   --target-fps 30 \
   --robot g1_29 \
   --refinement-iterations 50 \
-  --workers 4 \
-  --gpu-ids 0,1 \
+  --batch-size 8 \
+  --preprocess-workers 4 \
+  --gpu-ids 0 \
   --resume \
   --skip-existing \
   --summary-csv outputs/refine_batch/summary.csv \
   --output outputs/refine_batch
 ```
 
-Batch inputs can also come from `--inputs` or a newline-separated `--input-list`. Batch outputs are written under `outputs/refine_batch/<input_stem>/` by default; duplicate stems use `__2`, `__3`, and so on. With `--preserve-tree`, files discovered under `--input-dir` keep their relative directory layout under the output root.
+Batch inputs can also come from `--inputs` or a newline-separated `--input-list`. `--input-dir` auto-detects `.npz` files by default; use repeatable `--input-pattern` only when you want a different or additional glob. Batch outputs are written under `outputs/refine_batch/<input_stem>/` by default; duplicate stems use `__2`, `__3`, and so on. With `--preserve-tree`, files discovered under `--input-dir` keep their relative directory layout under the output root.
 
-The restartable manifest is written incrementally to `outputs/refine_batch/batch_manifest.json`. Use `--dry-run` to write the planned manifest without retargeting, `--summary-csv` for a compact table, and `--fail-fast` to stop after the first blocking failure. By default the CLI continues after item failures and exits nonzero if any item failed or quality-invalid item was not allowed.
+In native batch mode, `--gpu-ids` selects the refinement device, while SMPL/SMPL-X preprocessing still uses `--device`.
+
+The restartable manifest is written incrementally to `outputs/refine_batch/batch_manifest.json`. Batch mode also writes `outputs/refine_batch/batch_results.csv` with one row per clip and a `decision` column marked `pass` or `reject` for completed items. Use `--dry-run` to write planned `pending` rows without retargeting, `--summary-csv` for an additional compact table, and `--fail-fast` to stop after the first failed item. By default the CLI continues after item failures and exits nonzero only if at least one item failed; quality-invalid items are rejected/recorded without making the batch command fail.
 
 ### Viewer
 

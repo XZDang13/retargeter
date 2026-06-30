@@ -15,6 +15,7 @@ from retargeter.refinement import RefinedMotion, export_refined_motion
 from retargeter.newton import export_retargeted_motion
 from retargeter.newton import RetargetedMotion
 from retargeter.newton import TorchRobotFKResult
+from retargeter.visualize import export_canonical_human_motion_npz
 
 
 G1_29_ROBOT = Path("retargeter/newton/configs/g1_29_robot.yaml")
@@ -202,6 +203,41 @@ def test_refine_cli_writes_final_training_layout(tmp_path: Path):
     assert not (output / "refinement_motion.npz").exists()
 
 
+def test_refine_cli_no_vertices_still_exports_human_contact_data(tmp_path: Path):
+    output = tmp_path / "refine_human_no_mesh"
+    assert refine.main(
+        [
+            "--input",
+            "mock",
+            "--output",
+            str(output),
+            "--mock-frames",
+            "2",
+            "--no-vertices",
+            "--refinement-iterations",
+            "0",
+            "--refinement-dtype",
+            "float64",
+            "--refinement-lbfgs",
+            "0",
+        ],
+        backend_factory=MockBackend,
+        refinement_fk_factory=lambda spec: FakeTorchFK(spec),
+    ) == 0
+
+    human_path = output / "human.npz"
+    assert human_path.exists()
+    with np.load(human_path, allow_pickle=False) as data:
+        assert "body_pos_w" in data
+        assert "body_quat_xyzw" in data
+        assert "vertices_w" not in data
+        assert "mesh_faces" not in data
+        assert "contact_score_left_foot" in data
+        assert "contact_binary_left_foot" in data
+        assert "foot_height_left_foot" in data
+        assert "foot_speed_left_foot" in data
+
+
 def test_refine_cli_save_retargeted_writes_debug_ik_stage_outputs(tmp_path: Path):
     output = tmp_path / "refine_debug"
     assert refine.main(
@@ -320,6 +356,10 @@ def test_refine_cli_batch_writes_per_input_layout_and_manifest(tmp_path: Path):
             assert (item_dir / name).exists(), f"{item_dir / name}"
         for name in ("retargeted_motion.npz", "retargeted_meta.yaml", "retargeted_quality.json"):
             assert not (item_dir / name).exists(), f"{item_dir / name}"
+        with np.load(item_dir / "human.npz", allow_pickle=False) as data:
+            assert "vertices_w" not in data
+            assert "mesh_faces" not in data
+            assert "contact_score_left_foot" in data
 
     manifest = json.loads((output / "batch_manifest.json").read_text(encoding="utf-8"))
     assert manifest["pipeline"] == "refine_batch"
@@ -329,6 +369,11 @@ def test_refine_cli_batch_writes_per_input_layout_and_manifest(tmp_path: Path):
     assert [Path(item["output_dir"]).name for item in manifest["items"]] == ["mock", "mock__2"]
     assert [item["status"] for item in manifest["items"]] == ["success", "success"]
     assert all("retargeted_motion" not in item["paths"] for item in manifest["items"])
+    assert all("human" in item["paths"] for item in manifest["items"])
+    results_csv = (output / "batch_results.csv").read_text(encoding="utf-8").splitlines()
+    assert results_csv[0].startswith("input,output_dir,decision,status")
+    assert ",pass,success," in results_csv[1]
+    assert ",pass,success," in results_csv[2]
 
 
 def test_refine_cli_batch_save_retargeted_writes_debug_ik_stage_outputs(tmp_path: Path):
@@ -423,6 +468,9 @@ def test_refine_cli_batch_records_failure_and_continues(tmp_path: Path):
     assert [item["status"] for item in manifest["items"]] == ["failed", "success"]
     assert manifest["items"][0]["error_type"] == "FileNotFoundError"
     assert manifest["items"][1]["error"] is None
+    results_csv = (output / "batch_results.csv").read_text(encoding="utf-8").splitlines()
+    assert ",reject,failed," in results_csv[1]
+    assert ",pass,success," in results_csv[2]
 
 
 def test_refine_cli_batch_input_list_dry_run_and_summary_csv(tmp_path: Path):
@@ -450,6 +498,9 @@ def test_refine_cli_batch_input_list_dry_run_and_summary_csv(tmp_path: Path):
     assert [item["status"] for item in manifest["items"]] == ["pending", "pending"]
     assert summary_csv.exists()
     assert summary_csv.read_text(encoding="utf-8").splitlines()[0].startswith("input,output_dir,status")
+    results_csv = (output / "batch_results.csv").read_text(encoding="utf-8").splitlines()
+    assert results_csv[0].startswith("input,output_dir,decision,status")
+    assert ",pending,pending," in results_csv[1]
     assert not (output / "mock").exists()
 
 
@@ -481,6 +532,30 @@ def test_refine_cli_batch_preserve_tree_dry_run(tmp_path: Path):
     assert manifest["items"][0]["status"] == "pending"
 
 
+def test_refine_cli_input_dir_defaults_to_npz_auto_detection(tmp_path: Path):
+    input_dir = tmp_path / "data"
+    input_dir.mkdir()
+    walk = input_dir / "walk.npz"
+    walk.touch()
+    (input_dir / "ignore.npy").touch()
+    output = tmp_path / "batch_npz_default"
+
+    assert refine.main(
+        [
+            "--input-dir",
+            str(input_dir),
+            "--output",
+            str(output),
+            "--dry-run",
+        ]
+    ) == 0
+
+    manifest = json.loads((output / "batch_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["input_count"] == 1
+    assert manifest["items"][0]["input"] == str(walk.resolve())
+    assert Path(manifest["items"][0]["output_dir"]) == output / "walk"
+
+
 def test_refine_pipeline_run_batch_returns_lightweight_results(tmp_path: Path):
     result = RefinePipeline(
         robot="g1_29",
@@ -496,6 +571,8 @@ def test_refine_pipeline_run_batch_returns_lightweight_results(tmp_path: Path):
     assert result.success_count == 2
     assert result.failure_count == 0
     assert result.manifest_path.exists()
+    assert result.results_csv_path == tmp_path / "api_batch" / "batch_results.csv"
+    assert result.results_csv_path.exists()
     assert [item.output_dir.name for item in result.items] == ["mock", "mock__2"]
     assert [item.frame_count for item in result.items] == [2, 2]
     assert all(item.success for item in result.items)
@@ -659,6 +736,28 @@ def test_viewer_pipeline_loads_refine_directory_refinement_without_success_field
     )
 
     assert result.motion_path == output / "final_motion.npz"
+    assert result.replay_result.frame_count == 3
+    assert (tmp_path / "viewer" / "newton_replay.json").exists()
+
+
+def test_viewer_pipeline_auto_skips_meshless_human_npz(tmp_path: Path):
+    spec = RobotSpec.from_yaml(G1_29_ROBOT)
+    output = tmp_path / "refine_meshless_human"
+    output.mkdir()
+    refined = _make_refinement_motion(spec, frames=3)
+    export_refined_motion(refined, output / "final_motion.npz")
+    human = pipeline_module.make_mock_canonical_motion(num_frames=3)
+    export_canonical_human_motion_npz(human, output / "human.npz")
+
+    result = ViewerPipeline().replay(
+        input_path=output,
+        output_dir=tmp_path / "viewer",
+        viewer="file",
+        backend=MockBackend(spec),
+        viewer_factory=fake_viewer_factory,
+    )
+
+    assert result.human_path == output / "human.npz"
     assert result.replay_result.frame_count == 3
     assert (tmp_path / "viewer" / "newton_replay.json").exists()
 

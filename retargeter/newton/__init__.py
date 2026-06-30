@@ -12,6 +12,7 @@ from .online_ik_runner import OnlineIKRetargetRunner
 from .postprocess import apply_ik_postprocess, clamp_joint_limits, clamp_joint_velocity
 from .robot_spec import RobotSpec, load_robot_spec
 from .sequence_ik_runner import (
+    BatchSequenceIKRetargetRunner,
     RetargetedMotion,
     SequenceIKRetargetRunner,
     retargeted_motion_from_frames,
@@ -20,6 +21,7 @@ from .torch_fk import TorchRobotFK, TorchRobotFKResult, max_position_error_again
 
 __all__ = [
     "BackendSolveResult",
+    "BatchSequenceIKRetargetRunner",
     "IKObjectiveDescriptor",
     "IKRetargetFrameResult",
     "IKState",

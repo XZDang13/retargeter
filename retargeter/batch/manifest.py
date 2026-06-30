@@ -20,6 +20,18 @@ SUMMARY_CSV_COLUMNS = [
     "error_type",
     "error",
 ]
+PASS_REJECT_CSV_COLUMNS = [
+    "input",
+    "output_dir",
+    "decision",
+    "status",
+    "quality_valid",
+    "failures",
+    "frame_count",
+    "fps",
+    "error_type",
+    "error",
+]
 
 
 @dataclass
@@ -108,6 +120,30 @@ def write_summary_csv(path: Path | str, manifest: BatchManifest) -> Path:
     return output
 
 
+def write_pass_reject_csv(path: Path | str, manifest: BatchManifest) -> Path:
+    output = Path(path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with output.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=PASS_REJECT_CSV_COLUMNS)
+        writer.writeheader()
+        for item in manifest.items:
+            writer.writerow(
+                {
+                    "input": item.input,
+                    "output_dir": item.output_dir,
+                    "decision": _pass_reject_decision(item),
+                    "status": item.status,
+                    "quality_valid": _csv_value(item.quality_valid),
+                    "failures": ";".join(str(value) for value in _quality_failures(item)),
+                    "frame_count": _csv_value(item.frame_count),
+                    "fps": _csv_value(item.fps),
+                    "error_type": _csv_value(item.error_type),
+                    "error": _csv_value(item.error),
+                }
+            )
+    return output
+
+
 def _manifest_to_dict(manifest: BatchManifest) -> dict[str, Any]:
     summary = summarize(manifest)
     return {
@@ -149,3 +185,25 @@ def _csv_value(value: Any) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
     return str(value)
+
+
+def _pass_reject_decision(item: BatchItemRecord) -> str:
+    if item.status == "success":
+        return "pass"
+    if item.status in {"invalid", "failed"}:
+        return "reject"
+    if item.status == "skipped":
+        if item.quality_valid is True:
+            return "pass"
+        if item.quality_valid is False:
+            return "reject"
+        return "skipped"
+    return item.status
+
+
+def _quality_failures(item: BatchItemRecord) -> list[Any]:
+    summary = item.quality_summary
+    if not isinstance(summary, dict):
+        return []
+    failures = summary.get("failures", [])
+    return list(failures) if isinstance(failures, list) else []

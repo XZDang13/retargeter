@@ -8,7 +8,7 @@ import torch
 
 from retargeter.newton import RobotSpec, RetargetedMotion, TorchRobotFKResult
 from retargeter.preprocess import CanonicalHumanMotion, FootContactResult, PreprocessResult
-from retargeter.refinement import RefinedMotion, TorchMotionRefiner, run_refinement
+from retargeter.refinement import RefinedMotion, TorchMotionRefiner, run_refinement, run_refinement_batch
 
 
 def test_torch_motion_refiner_outputs_valid_refined_motion_and_preserves_inputs():
@@ -65,6 +65,27 @@ def test_torch_motion_refiner_missing_contact_runs_with_zero_contact_losses():
     assert refined.quality_metrics["final/grounding/loss"] == 0.0
     assert refined.quality_metrics["final/skating/loss"] == 0.0
     refined.validate()
+
+
+def test_run_refinement_batch_pads_and_unpads_variable_length_clips():
+    spec = _make_robot_spec()
+    first = _make_retargeted(spec, frames=5)
+    second = _make_retargeted(spec, frames=3, root_height=0.14)
+    preprocess = [_make_preprocess(first, with_contact=True), _make_preprocess(second, with_contact=True)]
+
+    refined = run_refinement_batch(
+        [first, second],
+        preprocess,
+        spec,
+        FakeTorchFK(spec),
+        config=_base_config(iterations=2),
+    )
+
+    assert [motion.num_frames() for motion in refined] == [5, 3]
+    assert all(isinstance(motion, RefinedMotion) for motion in refined)
+    assert [motion.quality_metrics["batch_valid_frame_count"] for motion in refined] == [5, 3]
+    assert all(motion.quality_metrics["batch_size"] == 2 for motion in refined)
+    assert all(motion.metadata["source"] == "BatchedTorchMotionRefiner" for motion in refined)
 
 
 def test_torch_motion_refiner_lbfgs_path_runs():

@@ -229,10 +229,10 @@ def build_refine_batch_tasks(
     config_has_refinement_device = _refinement_config_has_device(refinement_config)
     tasks: list[RefineBatchTask] = []
     for index, input_path in enumerate(input_paths):
-        task_device = worker_devices[index % len(worker_devices)] if worker_devices else device
+        task_device = device
         task_refinement_device = refinement_device
         if task_refinement_device is None and worker_devices and not config_has_refinement_device:
-            task_refinement_device = task_device
+            task_refinement_device = worker_devices[index % len(worker_devices)]
         tasks.append(
             RefineBatchTask(
                 input_path=input_path,

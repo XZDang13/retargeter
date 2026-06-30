@@ -81,6 +81,59 @@ class SequenceIKRetargetRunner:
         return retargeted_motion_from_frames(frame_results, fps=float(motion.fps), metadata={"source_frames": motion.num_frames()})
 
 
+class BatchSequenceIKRetargetRunner:
+    def __init__(self, solver: NewtonIKRetargetSolver):
+        self.solver = solver
+
+    def run(
+        self,
+        motions: list[CanonicalHumanMotion],
+        *,
+        contact_results: list[FootContactResult | None] | None = None,
+        progress: ProgressReporter | None = None,
+    ) -> list[RetargetedMotion]:
+        if not motions:
+            return []
+        for motion in motions:
+            motion.validate()
+        contacts = contact_results if contact_results is not None else [None] * len(motions)
+        if len(contacts) != len(motions):
+            raise ValueError("contact_results must match motions length.")
+
+        reporter = get_progress(progress)
+        previous: list[IKRetargetFrameResult | None] = [None] * len(motions)
+        frame_results: list[list[IKRetargetFrameResult]] = [[] for _ in motions]
+        max_frames = max(motion.num_frames() for motion in motions)
+        total_frames = sum(motion.num_frames() for motion in motions)
+
+        with reporter.bar(total=total_frames, desc="Batch IK retarget", unit="frame") as bar:
+            for frame_idx in range(max_frames):
+                active_indices = [idx for idx, motion in enumerate(motions) if frame_idx < motion.num_frames()]
+                if not active_indices:
+                    continue
+                active_results = self.solver.solve_frames_batch(
+                    [motions[idx] for idx in active_indices],
+                    frame_idx,
+                    contact_results=[contacts[idx] for idx in active_indices],
+                    previous_results=[previous[idx] for idx in active_indices],
+                )
+                for active_index, result in zip(active_indices, active_results):
+                    frame_results[active_index].append(result)
+                    previous[active_index] = result
+                bar.update(len(active_indices))
+
+        outputs = []
+        for motion, results in zip(motions, frame_results):
+            outputs.append(
+                retargeted_motion_from_frames(
+                    results,
+                    fps=float(motion.fps),
+                    metadata={"source_frames": motion.num_frames(), "native_batch": True},
+                )
+            )
+        return outputs
+
+
 def retargeted_motion_from_frames(
     frame_results: list[IKRetargetFrameResult],
     *,

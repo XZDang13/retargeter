@@ -13,6 +13,7 @@ from retargeter.batch.manifest import (
     save_manifest,
     summarize,
     update_item,
+    write_pass_reject_csv,
     write_summary_csv,
 )
 
@@ -41,6 +42,12 @@ def test_manifest_round_trip_update_summary_and_csv(tmp_path: Path):
     lines = csv_path.read_text(encoding="utf-8").splitlines()
     assert lines[0] == "input,output_dir,status,frame_count,fps,runtime_sec,quality_valid,error_type,error"
     assert "a,out/a,success,3,30.0" in lines[1]
+
+    results_csv_path = write_pass_reject_csv(tmp_path / "batch_results.csv", loaded)
+    result_lines = results_csv_path.read_text(encoding="utf-8").splitlines()
+    assert result_lines[0] == "input,output_dir,decision,status,quality_valid,failures,frame_count,fps,error_type,error"
+    assert result_lines[1].startswith("a,out/a,pass,success")
+    assert result_lines[2].startswith("b,out/b,reject,failed")
 
 
 def test_manifest_summary_counts_invalid_as_rejected_not_failed():

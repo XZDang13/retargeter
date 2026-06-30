@@ -7,6 +7,7 @@ from pathlib import Path
 import numpy as np
 
 from retargeter.batch.manifest import BatchItemRecord, BatchManifest, save_manifest, write_summary_csv
+from retargeter.batch.native import NativeBatchRefineRunner
 from retargeter.batch.runner import BatchRefineRunner, build_refine_batch_tasks
 from retargeter.batch.worker import RefineBatchTask
 
@@ -92,13 +93,21 @@ def test_build_refine_batch_tasks_default_and_preserve_tree(tmp_path: Path):
 
 
 def test_build_refine_batch_tasks_gpu_assignment_respects_explicit_refinement_device(tmp_path: Path):
+    worker_device_tasks = build_refine_batch_tasks(
+        ["a", "b"],
+        tmp_path / "out_worker",
+        worker_devices=["cuda:0", "cuda:1"],
+    )
+    assert [task.device for task in worker_device_tasks] == ["cpu", "cpu"]
+    assert [task.refinement_device for task in worker_device_tasks] == ["cuda:0", "cuda:1"]
+
     tasks = build_refine_batch_tasks(
         ["a", "b"],
         tmp_path / "out",
         refinement_config={"refiner": {"device": "cpu"}},
         worker_devices=["cuda:0", "cuda:1"],
     )
-    assert [task.device for task in tasks] == ["cuda:0", "cuda:1"]
+    assert [task.device for task in tasks] == ["cpu", "cpu"]
     assert [task.refinement_device for task in tasks] == [None, None]
 
     explicit_tasks = build_refine_batch_tasks(
@@ -108,7 +117,7 @@ def test_build_refine_batch_tasks_gpu_assignment_respects_explicit_refinement_de
         refinement_config={"refiner": {"device": "cpu"}},
         worker_devices=["cuda:0"],
     )
-    assert explicit_tasks[0].device == "cuda:0"
+    assert explicit_tasks[0].device == "cpu"
     assert explicit_tasks[0].refinement_device == "cuda:2"
 
 
@@ -199,6 +208,73 @@ def test_batch_refine_runner_parallel_with_fake_worker(tmp_path: Path):
     ).run(tasks, workers=2)
 
     assert sorted(item.status for item in manifest.items) == ["success", "success"]
+
+
+def test_native_batch_refine_runner_chunks_items_and_updates_manifest(tmp_path: Path, monkeypatch):
+    calls: list[list[str]] = []
+
+    def fake_process_chunk(self, chunk, *, progress):
+        calls.append([str(task.input_path) for task in chunk])
+        return [
+            BatchItemRecord(
+                input=str(task.input_path),
+                output_dir=str(task.output_dir),
+                status="success",
+                frame_count=2,
+                fps=50.0,
+                runtime_sec=0.01,
+                quality_valid=True,
+            )
+            for task in chunk
+        ]
+
+    monkeypatch.setattr(NativeBatchRefineRunner, "_process_chunk", fake_process_chunk)
+    tasks = build_refine_batch_tasks(["a", "b", "c"], tmp_path / "out")
+
+    manifest = NativeBatchRefineRunner(manifest_path=tmp_path / "out" / "batch_manifest.json").run(tasks, batch_size=2)
+
+    assert calls == [["a", "b"], ["c"]]
+    assert [item.status for item in manifest.items] == ["success", "success", "success"]
+    payload = json.loads((tmp_path / "out" / "batch_manifest.json").read_text(encoding="utf-8"))
+    assert payload["success_count"] == 3
+
+
+def test_native_batch_refine_runner_parallel_preprocess_feeds_native_batches(tmp_path: Path, monkeypatch):
+    processed_batches: list[list[str]] = []
+
+    def fake_process_prepared_items(self, items, *, progress):
+        processed_batches.append([str(item.task.input_path) for item in items])
+        return [
+            BatchItemRecord(
+                input=str(item.task.input_path),
+                output_dir=str(item.task.output_dir),
+                status="success",
+                frame_count=item.preprocess_result.motion.num_frames(),
+                fps=float(item.preprocess_result.motion.fps),
+                runtime_sec=0.01,
+                quality_valid=True,
+            )
+            for item in items
+        ]
+
+    monkeypatch.setattr(NativeBatchRefineRunner, "_process_prepared_items", fake_process_prepared_items)
+    tasks = build_refine_batch_tasks(
+        ["mock", "mock", "mock"],
+        tmp_path / "out",
+        mock_frames=2,
+        return_vertices=False,
+        export_human=False,
+    )
+
+    manifest = NativeBatchRefineRunner(manifest_path=tmp_path / "out" / "batch_manifest.json").run(
+        tasks,
+        batch_size=2,
+        preprocess_workers=2,
+    )
+
+    assert processed_batches == [["mock", "mock"], ["mock"]]
+    assert [item.status for item in manifest.items] == ["success", "success", "success"]
+    assert [item.frame_count for item in manifest.items] == [2, 2, 2]
 
 
 def test_batch_refine_runner_progress_updates_for_parallel_parent_completions(tmp_path: Path):
