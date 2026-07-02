@@ -113,6 +113,28 @@ def test_refinement_quality_skating_gate_uses_contact_scores_only_when_available
     assert missing_contact_report.metrics["skating_gate_evaluated"] is False
 
 
+def test_refinement_quality_allows_small_absolute_skating_worsening():
+    spec = _make_robot_spec()
+    retargeted = _make_retargeted(spec, frames=60)
+    refined = _make_refined(retargeted)
+    ankle_idx = refined.body_names.index("left_ankle_roll_link")
+    refined.body_pos_w[:, ankle_idx, 0] += np.linspace(0.0, 0.02, refined.num_frames())
+    config = _loose_quality_config()
+
+    report = evaluate_refinement_quality(
+        retargeted,
+        refined,
+        spec,
+        config=config,
+        contact_score={"left_foot": np.ones(refined.num_frames(), dtype=np.float64)},
+    )
+
+    assert report.valid is True
+    assert report.metrics["skating_improvement_m_s"] < -report.thresholds["skating_worsening_tolerance_m_s"]
+    assert report.metrics["refined_weighted_skating_m_s"] < report.thresholds["max_refined_skating_m_s"]
+    assert "skating_not_improved" not in report.failures
+
+
 def test_refinement_quality_penetration_worsening_fails():
     spec = _make_robot_spec()
     retargeted = _make_retargeted(spec)

@@ -23,6 +23,7 @@ DEFAULT_QUALITY_CONFIG: dict[str, float | bool] = {
     "fail_on_joint_velocity_violation": False,
     "penetration_worsening_tolerance_m": 0.005,
     "skating_worsening_tolerance_m_s": 0.005,
+    "max_refined_skating_m_s": 0.03,
     "skating_min_improvement_m_s": 0.0,
 }
 DEFAULT_PHYSICAL_FEASIBILITY_CONFIG: dict[str, float | bool] = {
@@ -146,7 +147,11 @@ def evaluate_refinement_quality(
     if contact_available:
         min_improvement = thresholds["skating_min_improvement_m_s"]
         tolerance = thresholds["skating_worsening_tolerance_m_s"]
-        if metrics["skating_improvement_m_s"] < min_improvement - tolerance:
+        max_refined_skating = thresholds["max_refined_skating_m_s"]
+        if (
+            metrics["skating_improvement_m_s"] < min_improvement - tolerance
+            and metrics["refined_weighted_skating_m_s"] > max_refined_skating
+        ):
             failures.append("skating_not_improved")
 
     metrics.update(_dynamics_metrics(refined, float(refined.fps), physical_thresholds))
