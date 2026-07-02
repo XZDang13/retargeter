@@ -47,7 +47,8 @@ NON_FRAME_KEYS = {
     "frame_rate",
     "framerate",
 }
-BATCH_ORDER_VALUES = {"input", "length"}
+DEFAULT_BATCH_FRAME_BUDGET = 12_000
+BATCH_ORDER_VALUES = {"input", "length", "length-desc", "length-asc"}
 
 
 @dataclass
@@ -88,6 +89,7 @@ class NativeBatchRefineRunner:
         dry_run: bool = False,
         preprocess_workers: int = 1,
         batch_order: str = "length",
+        batch_frame_budget: int | None = DEFAULT_BATCH_FRAME_BUDGET,
         progress: ProgressReporter | None = None,
     ) -> BatchManifest:
         if batch_size <= 0:
@@ -96,6 +98,8 @@ class NativeBatchRefineRunner:
             raise ValueError("preprocess_workers must be positive.")
         if batch_order not in BATCH_ORDER_VALUES:
             raise ValueError(f"batch_order must be one of {sorted(BATCH_ORDER_VALUES)}, got {batch_order!r}.")
+        if batch_frame_budget is not None and batch_frame_budget <= 0:
+            raise ValueError("batch_frame_budget must be positive when set.")
         reporter = get_progress(progress)
         task_list = list(tasks)
         manifest = _initial_manifest(
@@ -113,7 +117,12 @@ class NativeBatchRefineRunner:
             return manifest
 
         runnable = [task for task in task_list if _record_for_task(manifest, task).status == "pending"]
-        batches = _task_batches(runnable, batch_size=batch_size, batch_order=batch_order)
+        batches = _task_batches(
+            runnable,
+            batch_size=batch_size,
+            batch_order=batch_order,
+            batch_frame_budget=batch_frame_budget,
+        )
         if preprocess_workers > 1:
             return self._run_with_parallel_preprocess(
                 manifest,
@@ -342,18 +351,72 @@ class NativeBatchRefineRunner:
         return records
 
 
-def _task_batches(tasks: Sequence[RefineBatchTask], *, batch_size: int, batch_order: str) -> list[list[RefineBatchTask]]:
+def _task_batches(
+    tasks: Sequence[RefineBatchTask],
+    *,
+    batch_size: int,
+    batch_order: str,
+    batch_frame_budget: int | None = None,
+) -> list[list[RefineBatchTask]]:
     if batch_order == "input":
-        return _chunk_tasks(list(tasks), batch_size)
-    if batch_order == "length":
-        return _length_bucketed_task_batches(tasks, batch_size=batch_size)
-    raise ValueError(f"batch_order must be one of {sorted(BATCH_ORDER_VALUES)}, got {batch_order!r}.")
+        indexed = [(index, _estimate_task_frame_count(task), task) for index, task in enumerate(tasks)]
+    elif batch_order in {"length", "length-desc"}:
+        indexed = _length_indexed_tasks(tasks, descending=True)
+    elif batch_order == "length-asc":
+        indexed = _length_indexed_tasks(tasks, descending=False)
+    else:
+        raise ValueError(f"batch_order must be one of {sorted(BATCH_ORDER_VALUES)}, got {batch_order!r}.")
+    return _chunk_indexed_tasks(indexed, batch_size=batch_size, batch_frame_budget=batch_frame_budget)
 
 
-def _length_bucketed_task_batches(tasks: Sequence[RefineBatchTask], *, batch_size: int) -> list[list[RefineBatchTask]]:
+def _length_bucketed_task_batches(
+    tasks: Sequence[RefineBatchTask],
+    *,
+    batch_size: int,
+    descending: bool = False,
+    batch_frame_budget: int | None = None,
+) -> list[list[RefineBatchTask]]:
+    return _chunk_indexed_tasks(
+        _length_indexed_tasks(tasks, descending=descending),
+        batch_size=batch_size,
+        batch_frame_budget=batch_frame_budget,
+    )
+
+
+def _length_indexed_tasks(tasks: Sequence[RefineBatchTask], *, descending: bool) -> list[tuple[int, int | None, RefineBatchTask]]:
     indexed = [(index, _estimate_task_frame_count(task), task) for index, task in enumerate(tasks)]
-    indexed.sort(key=lambda item: (item[1] is None, item[1] if item[1] is not None else 0, item[0]))
-    return _chunk_tasks([task for _, _, task in indexed], batch_size)
+    if descending:
+        indexed.sort(key=lambda item: (item[1] is None, -(item[1] or 0), item[0]))
+    else:
+        indexed.sort(key=lambda item: (item[1] is None, item[1] if item[1] is not None else 0, item[0]))
+    return indexed
+
+
+def _chunk_indexed_tasks(
+    indexed_tasks: list[tuple[int, int | None, RefineBatchTask]],
+    *,
+    batch_size: int,
+    batch_frame_budget: int | None,
+) -> list[list[RefineBatchTask]]:
+    if batch_frame_budget is None:
+        return _chunk_tasks([task for _, _, task in indexed_tasks], batch_size)
+
+    batches: list[list[RefineBatchTask]] = []
+    current: list[RefineBatchTask] = []
+    current_budget = 0
+    for _, frames, task in indexed_tasks:
+        task_budget = int(frames) if frames is not None and frames > 0 else 1
+        would_exceed_count = len(current) >= batch_size
+        would_exceed_budget = bool(current) and current_budget + task_budget > batch_frame_budget
+        if would_exceed_count or would_exceed_budget:
+            batches.append(current)
+            current = []
+            current_budget = 0
+        current.append(task)
+        current_budget += task_budget
+    if current:
+        batches.append(current)
+    return batches
 
 
 def _chunk_tasks(tasks: list[RefineBatchTask], batch_size: int) -> list[list[RefineBatchTask]]:
@@ -785,6 +848,11 @@ def _native_progress_postfix(
     if preprocess_workers is not None:
         postfix["prep"] = int(preprocess_workers)
     if current:
+        estimated_frames = [_estimate_task_frame_count(task) for task in current]
+        known_frames = [frames for frames in estimated_frames if frames is not None]
+        postfix["active"] = len(current)
+        if known_frames:
+            postfix["frames"] = int(sum(known_frames))
         postfix["item"] = Path(str(current[0].input_path)).stem if str(current[0].input_path).lower() != "mock" else "mock"
     return postfix
 

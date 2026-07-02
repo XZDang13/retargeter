@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 
 from retargeter.batch.manifest import BatchItemRecord, BatchManifest, save_manifest, write_summary_csv
-from retargeter.batch.native import NativeBatchRefineRunner, _estimate_task_frame_count, _length_bucketed_task_batches
+from retargeter.batch.native import NativeBatchRefineRunner, _estimate_task_frame_count, _length_bucketed_task_batches, _task_batches
 from retargeter.batch.runner import BatchRefineRunner, build_refine_batch_tasks
 from retargeter.batch.worker import RefineBatchTask
 
@@ -291,9 +291,35 @@ def test_native_batch_refine_runner_defaults_to_length_bucketed_chunks(tmp_path:
 
     manifest = NativeBatchRefineRunner(manifest_path=tmp_path / "out" / "batch_manifest.json").run(tasks, batch_size=2)
 
-    assert calls == [["short.npz", "mid.npz"], ["long.npz"]]
+    assert calls == [["long.npz", "mid.npz"], ["short.npz"]]
     assert [item.input for item in manifest.items] == [str(path) for path in paths]
     assert [item.status for item in manifest.items] == ["success", "success", "success"]
+
+
+def test_native_batch_frame_budget_splits_long_length_buckets(tmp_path: Path):
+    input_dir = tmp_path / "inputs"
+    input_dir.mkdir()
+    names_and_frames = [
+        ("very_long.npz", 1000),
+        ("long.npz", 900),
+        ("mid.npz", 350),
+        ("short.npz", 200),
+        ("tiny.npz", 100),
+    ]
+    paths = []
+    for name, frames in names_and_frames:
+        path = input_dir / name
+        np.savez_compressed(path, trans=np.zeros((frames, 3)), fps=np.asarray(50.0))
+        paths.append(path)
+    tasks = build_refine_batch_tasks(paths, tmp_path / "out", target_fps=50)
+
+    batches = _task_batches(tasks, batch_size=32, batch_order="length", batch_frame_budget=1000)
+
+    assert [[Path(task.input_path).name for task in batch] for batch in batches] == [
+        ["very_long.npz"],
+        ["long.npz"],
+        ["mid.npz", "short.npz", "tiny.npz"],
+    ]
 
 
 def test_native_batch_refine_runner_parallel_preprocess_feeds_native_batches(tmp_path: Path, monkeypatch):

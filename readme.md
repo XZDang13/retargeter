@@ -92,7 +92,7 @@ Refinement quality includes a post-refine physical feasibility gate for joint li
 
 Refine progress uses `tqdm` on stderr. `--progress auto` is the default and shows bars in interactive terminals; use `--progress on` to force progress in logs or `--progress off` for quiet scripting.
 
-Batch refine writes one standard refine directory per clip. By default it uses native solver-level microbatches for Newton IK and Torch refinement while keeping quality, export, and manifest records per clip. Native batches are grouped by estimated post-resample frame count so similar-length clips share a padded batch; pass `--batch-order input` only when you need old input-order grouping. Use `--batch-size` to control the native IK/refine microbatch size, and `--preprocess-workers` to fan out SMPL/SMPL-X loading, resampling, FK, contact, and `human.npz` export before each microbatch. Pass `--no-native-batch` with `--workers` only when you want the legacy per-item multiprocessing wrapper.
+Batch refine writes one standard refine directory per clip. By default it uses native solver-level microbatches for Newton IK and Torch refinement while keeping quality, export, and manifest records per clip. Native batches are grouped by estimated post-resample frame count so similar-length clips share a padded batch, and long clips run first. `--batch-size` is the maximum clip count per native microbatch; `--batch-frame-budget` caps the estimated total post-resample frames in a microbatch so very long CMU clips do not all land in one Newton IK batch. Pass `--batch-order input` only when you need old input-order grouping. Use `--preprocess-workers` to fan out SMPL/SMPL-X loading, resampling, FK, contact, and `human.npz` export before each microbatch. Pass `--no-native-batch` with `--workers` only when you want the legacy per-item multiprocessing wrapper.
 
 ```bash
 PYTHONPATH=. python -m retargeter.cli.refine \
@@ -103,6 +103,7 @@ PYTHONPATH=. python -m retargeter.cli.refine \
   --robot g1_29 \
   --refinement-iterations 50 \
   --batch-size 8 \
+  --batch-frame-budget 12000 \
   --preprocess-workers 4 \
   --gpu-ids 0 \
   --resume \

@@ -75,6 +75,7 @@ def main(argv: list[str] | None = None, *, backend_factory=None, refinement_fk_f
             batch_size=int(args.batch_size),
             preprocess_workers=int(args.preprocess_workers),
             batch_order=args.batch_order,
+            batch_frame_budget=None if int(args.batch_frame_budget) == 0 else int(args.batch_frame_budget),
             progress=progress,
         )
         print(batch_result.manifest_path)
@@ -153,9 +154,15 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--batch-size", type=int, default=8, help="Native batch microbatch size.")
     parser.add_argument(
         "--batch-order",
-        choices=["length", "input"],
+        choices=["length", "length-desc", "length-asc", "input"],
         default="length",
-        help="Native batch grouping order. 'length' buckets clips by estimated frame count; 'input' preserves input order.",
+        help="Native batch grouping order. 'length'/'length-desc' runs long clips first; 'length-asc' runs short clips first; 'input' preserves input order.",
+    )
+    parser.add_argument(
+        "--batch-frame-budget",
+        type=int,
+        default=12000,
+        help="Max estimated post-resample frames per native microbatch. Use 0 to disable.",
     )
     parser.add_argument(
         "--preprocess-workers",
@@ -250,6 +257,8 @@ def _validate_input_mode(parser: argparse.ArgumentParser, args: argparse.Namespa
         parser.error("--processes-per-gpu must be positive.")
     if args.batch_size <= 0:
         parser.error("--batch-size must be positive.")
+    if args.batch_frame_budget < 0:
+        parser.error("--batch-frame-budget must be non-negative.")
     if args.preprocess_workers <= 0:
         parser.error("--preprocess-workers must be positive.")
     if args.min_motion_frames <= 0:
