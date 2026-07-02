@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import io
+import sys
+import types
 
 import pytest
 
 import retargeter.progress as progress_module
+from retargeter.runtime_logging import configure_native_runtime_logging
 from retargeter.progress import make_progress
 
 
@@ -79,3 +82,14 @@ def test_progress_missing_tqdm_raises_only_when_enabled(monkeypatch):
     enabled = make_progress("on", stream=_TTYStringIO(tty=False))
     with pytest.raises(RuntimeError, match="tqdm is required"):
         enabled.stage("visible")
+
+
+def test_configure_native_runtime_logging_sets_warp_quiet(monkeypatch):
+    fake_warp = types.SimpleNamespace(config=types.SimpleNamespace(quiet=False))
+    monkeypatch.setitem(sys.modules, "warp", fake_warp)
+
+    configure_native_runtime_logging(quiet=True)
+    assert fake_warp.config.quiet is True
+
+    configure_native_runtime_logging(quiet=False)
+    assert fake_warp.config.quiet is False

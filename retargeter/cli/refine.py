@@ -6,12 +6,14 @@ from pathlib import Path
 from retargeter.batch import assign_device, discover_inputs, filter_motion_inputs, parse_gpu_ids
 from retargeter.pipeline import RefinePipeline, load_refinement_config_file, refinement_config_with_overrides
 from retargeter.progress import make_progress
+from retargeter.runtime_logging import configure_native_runtime_logging
 
 
 def main(argv: list[str] | None = None, *, backend_factory=None, refinement_fk_factory=None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
     _validate_input_mode(parser, args)
+    configure_native_runtime_logging(quiet=True)
     progress = make_progress(args.progress)
     config = refinement_config_with_overrides(
         load_refinement_config_file(args.refinement_config),

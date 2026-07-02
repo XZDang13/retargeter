@@ -10,6 +10,7 @@ from typing import Any, Callable
 import numpy as np
 
 from retargeter.progress import ProgressReporter
+from retargeter.runtime_logging import configure_native_runtime_logging
 
 from .manifest import BatchItemRecord
 
@@ -70,6 +71,7 @@ def _process_refine_batch_task(
     progress: ProgressReporter | None = None,
 ) -> BatchItemRecord:
     start = time.perf_counter()
+    configure_native_runtime_logging(quiet=True)
     try:
         from retargeter.pipeline import RefinePipeline
 
