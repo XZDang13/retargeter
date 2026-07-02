@@ -7,7 +7,13 @@ from .ik_retarget_solver import (
     load_newton_ik_config,
 )
 from .newton_backend import BackendSolveResult, IKState, NewtonBackend, NewtonSolveSettings, RobotBodyState
-from .objectives import IKObjectiveDescriptor, build_regularization_objectives, build_target_objectives
+from .objectives import (
+    IKObjectiveDescriptor,
+    SelfCollisionPairSpec,
+    build_regularization_objectives,
+    build_self_collision_objectives,
+    build_target_objectives,
+)
 from .online_ik_runner import OnlineIKRetargetRunner
 from .postprocess import apply_ik_postprocess, clamp_joint_limits, clamp_joint_velocity
 from .robot_spec import RobotSpec, load_robot_spec
@@ -33,10 +39,12 @@ __all__ = [
     "RobotBodyState",
     "RobotSpec",
     "SequenceIKRetargetRunner",
+    "SelfCollisionPairSpec",
     "TorchRobotFK",
     "TorchRobotFKResult",
     "apply_ik_postprocess",
     "build_regularization_objectives",
+    "build_self_collision_objectives",
     "build_target_objectives",
     "clamp_joint_limits",
     "clamp_joint_velocity",

@@ -23,3 +23,69 @@ postprocess:
   velocity_limit_scale: 1.0
   feet_stabilization:
     enabled: false
+
+self_collision:
+  enabled: true
+  weight: 3.0
+  margin_m: 0.06
+  pairs:
+    - name: left_hand_torso
+      point_body: left_rubber_hand_link
+      obstacle:
+        shape: sphere
+        body: torso_link
+        center: [0.0, 0.0, 0.0]
+        radius_m: 0.16
+    - name: right_hand_torso
+      point_body: right_rubber_hand_link
+      obstacle:
+        shape: sphere
+        body: torso_link
+        center: [0.0, 0.0, 0.0]
+        radius_m: 0.16
+    - name: left_hand_pelvis
+      point_body: left_rubber_hand_link
+      obstacle:
+        shape: sphere
+        body: pelvis
+        center: [0.0, 0.0, 0.0]
+        radius_m: 0.14
+    - name: right_hand_pelvis
+      point_body: right_rubber_hand_link
+      obstacle:
+        shape: sphere
+        body: pelvis
+        center: [0.0, 0.0, 0.0]
+        radius_m: 0.14
+    - name: left_hand_right_elbow
+      point_body: left_rubber_hand_link
+      margin_m: 0.05
+      obstacle:
+        shape: sphere
+        body: right_elbow_link
+        center: [0.0, 0.0, 0.0]
+        radius_m: 0.08
+    - name: right_hand_left_elbow
+      point_body: right_rubber_hand_link
+      margin_m: 0.05
+      obstacle:
+        shape: sphere
+        body: left_elbow_link
+        center: [0.0, 0.0, 0.0]
+        radius_m: 0.08
+    - name: left_ankle_right_knee
+      point_body: left_ankle_roll_link
+      margin_m: 0.05
+      obstacle:
+        shape: sphere
+        body: right_knee_link
+        center: [0.0, 0.0, 0.0]
+        radius_m: 0.10
+    - name: right_ankle_left_knee
+      point_body: right_ankle_roll_link
+      margin_m: 0.05
+      obstacle:
+        shape: sphere
+        body: left_knee_link
+        center: [0.0, 0.0, 0.0]
+        radius_m: 0.10

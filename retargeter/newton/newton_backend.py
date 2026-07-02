@@ -358,6 +358,16 @@ class NewtonBackend:
                 )
                 native.append(native_objective)
                 bindings.append(_NativeObjectiveBinding(descriptor_index, objective.kind, native_objective))
+            elif objective.kind == "self_collision":
+                from .self_collision_objectives import IKSelfCollisionObjective
+
+                native_objective = IKSelfCollisionObjective(
+                    objective.self_collision_pairs or (),
+                    body_name_to_index=self._body_name_to_newton_index,
+                    weight=float(objective.weight),
+                )
+                native.append(native_objective)
+                bindings.append(_NativeObjectiveBinding(descriptor_index, objective.kind, native_objective))
         return native, bindings
 
     def _build_bound_native_objectives_batch(
@@ -433,6 +443,16 @@ class NewtonBackend:
                     weight=float(objective.weight),
                     coord_start=7 if self.robot_spec.floating_base else 0,
                     dof_start=6 if self.robot_spec.floating_base else 0,
+                )
+                native.append(native_objective)
+                bindings.append(_NativeObjectiveBinding(descriptor_index, objective.kind, native_objective))
+            elif objective.kind == "self_collision":
+                from .self_collision_objectives import IKSelfCollisionObjective
+
+                native_objective = IKSelfCollisionObjective(
+                    objective.self_collision_pairs or (),
+                    body_name_to_index=self._body_name_to_newton_index,
+                    weight=float(objective.weight),
                 )
                 native.append(native_objective)
                 bindings.append(_NativeObjectiveBinding(descriptor_index, objective.kind, native_objective))
@@ -606,6 +626,8 @@ class ReusableNewtonIKSolver:
             elif binding.kind in {"posture", "smooth", "damping"}:
                 binding.native.set_target(0, np.asarray(objective.target, dtype=np.float64))
                 binding.native.set_weight(float(objective.weight))
+            elif binding.kind == "self_collision":
+                binding.native.set_weight(float(objective.weight))
 
 
 class ReusableNewtonIKBatchSolver:
@@ -761,6 +783,8 @@ class ReusableNewtonIKBatchSolver:
                         problem_index,
                         np.asarray(objectives[binding.descriptor_index].target, dtype=np.float64),
                     )
+            elif binding.kind == "self_collision":
+                binding.native.set_weight(float(first.weight))
 
 
 def _solver_reuse_settings_key(settings: NewtonSolveSettings) -> tuple[str, str, float]:
@@ -785,6 +809,13 @@ def _native_objective_layout_key(objectives: list[IKObjectiveDescriptor]) -> tup
             layout.append((objective.kind,))
         elif objective.kind in {"posture", "smooth", "damping"}:
             layout.append((objective.kind,))
+        elif objective.kind == "self_collision":
+            layout.append(
+                (
+                    objective.kind,
+                    tuple(pair.layout_key() for pair in (objective.self_collision_pairs or ())),
+                )
+            )
     return tuple(layout)
 
 

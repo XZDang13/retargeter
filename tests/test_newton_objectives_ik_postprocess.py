@@ -6,7 +6,12 @@ import numpy as np
 import pytest
 
 from conftest import make_canonical_motion
-from retargeter.newton import RobotSpec, build_regularization_objectives, build_target_objectives
+from retargeter.newton import (
+    RobotSpec,
+    build_regularization_objectives,
+    build_self_collision_objectives,
+    build_target_objectives,
+)
 from retargeter.newton.newton_backend import NewtonBackend, _native_objective_layout_key
 from retargeter.newton.objectives import IKObjectiveDescriptor
 from retargeter.newton.postprocess import apply_ik_postprocess, clamp_joint_limits, clamp_joint_velocity
@@ -112,6 +117,125 @@ def test_newton_backend_binds_regularization_as_native_objectives():
     assert [binding.kind for binding in bindings] == ["posture", "smooth"]
     assert [objective.residual_dim() for objective in native] == [spec.num_dofs, spec.num_dofs]
     assert _native_objective_layout_key(descriptors) == (("posture",), ("smooth",))
+
+
+def test_self_collision_config_validation_and_layout_key():
+    spec = RobotSpec.from_yaml(G1_29_ROBOT)
+    config = {
+        "enabled": True,
+        "weight": 3.0,
+        "margin_m": 0.06,
+        "pairs": [
+            {
+                "name": "left_hand_torso",
+                "point_body": "left_wrist_yaw_link",
+                "obstacle": {"shape": "sphere", "body": "torso_link", "radius_m": 0.14},
+            }
+        ],
+    }
+
+    descriptors = build_self_collision_objectives(spec, config)
+
+    assert [descriptor.kind for descriptor in descriptors] == ["self_collision"]
+    assert descriptors[0].self_collision_pairs[0].name == "left_hand_torso"
+    assert _native_objective_layout_key(descriptors)[0][0] == "self_collision"
+
+    bad = dict(config)
+    bad["pairs"] = [
+        {
+            "name": "bad_body",
+            "point_body": "missing_link",
+            "obstacle": {"shape": "sphere", "body": "torso_link", "radius_m": 0.14},
+        }
+    ]
+    with pytest.raises(ValueError, match="missing required bodies"):
+        build_self_collision_objectives(spec, bad)
+
+    bad_radius = dict(config)
+    bad_radius["pairs"] = [
+        {
+            "name": "bad_radius",
+            "point_body": "left_wrist_yaw_link",
+            "obstacle": {"shape": "sphere", "body": "torso_link", "radius_m": 0.0},
+        }
+    ]
+    with pytest.raises(ValueError, match="radius"):
+        build_self_collision_objectives(spec, bad_radius)
+
+    bad_empty = dict(config)
+    bad_empty["pairs"] = []
+    with pytest.raises(ValueError, match="non-empty list"):
+        build_self_collision_objectives(spec, bad_empty)
+
+
+def test_self_collision_objective_residuals_are_batched():
+    pytest.importorskip("newton")
+    wp = pytest.importorskip("warp")
+    from newton._src.sim.ik.ik_common import IKJacobianType
+    from retargeter.newton.objectives import SelfCollisionPairSpec
+    from retargeter.newton.self_collision_objectives import IKSelfCollisionObjective
+
+    device = wp.get_device("cpu")
+    pair = SelfCollisionPairSpec(
+        name="point_sphere",
+        point_body="point",
+        obstacle_body="obstacle",
+        obstacle_shape="sphere",
+        obstacle_radius_m=0.20,
+        margin_m=0.10,
+    )
+    objective = IKSelfCollisionObjective((pair,), body_name_to_index={"point": 0, "obstacle": 1}, weight=2.0)
+    objective.set_batch_layout(total_residuals=1, residual_offset=0, n_batch=2)
+    objective.bind_device(device)
+    objective.init_buffers(model=None, jacobian_mode=IKJacobianType.AUTODIFF)
+
+    identity = wp.quat(0.0, 0.0, 0.0, 1.0)
+    body_q = wp.array(
+        [
+            [wp.transform(wp.vec3(0.25, 0.0, 0.0), identity), wp.transform(wp.vec3(0.0, 0.0, 0.0), identity)],
+            [wp.transform(wp.vec3(0.50, 0.0, 0.0), identity), wp.transform(wp.vec3(0.0, 0.0, 0.0), identity)],
+        ],
+        dtype=wp.transform,
+        device=device,
+    )
+    residuals = wp.zeros((2, 1), dtype=wp.float32, device=device)
+    joint_q = wp.zeros((2, 1), dtype=wp.float32, device=device)
+    problem_idx = wp.array(np.asarray([0, 1], dtype=np.int32), dtype=wp.int32, device=device)
+
+    objective.compute_residuals(body_q, joint_q, None, residuals, 0, problem_idx)
+    wp.synchronize()
+
+    values = residuals.numpy()
+    assert values[0, 0] == pytest.approx(0.10, abs=1e-5)
+    assert values[1, 0] == pytest.approx(0.0, abs=1e-6)
+
+
+def test_newton_backend_binds_self_collision_objective():
+    pytest.importorskip("newton")
+    pytest.importorskip("warp")
+    spec = RobotSpec.from_yaml(G1_29_ROBOT)
+    backend = NewtonBackend(spec)
+    backend._ensure_loaded()
+    descriptors = build_self_collision_objectives(
+        spec,
+        {
+            "enabled": True,
+            "weight": 3.0,
+            "margin_m": 0.06,
+            "pairs": [
+                {
+                    "name": "left_hand_torso",
+                    "point_body": "left_wrist_yaw_link",
+                    "obstacle": {"shape": "sphere", "body": "torso_link", "radius_m": 0.14},
+                }
+            ],
+        },
+    )
+
+    native, bindings = backend._build_bound_native_objectives(descriptors)
+
+    assert [binding.kind for binding in bindings] == ["self_collision"]
+    assert [objective.residual_dim() for objective in native] == [1]
 
 
 def test_joint_limit_and_velocity_clamps_are_deterministic():

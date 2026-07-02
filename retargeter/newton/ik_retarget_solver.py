@@ -11,7 +11,8 @@ from retargeter.preprocess.lowpass import normalize_quat_xyzw
 from retargeter.scale import IKTargetBuilder, IKTargetSet
 
 from .newton_backend import BackendSolveResult, IKBackend, IKState, NewtonBackend, NewtonSolveSettings, RobotBodyState
-from .objectives import build_regularization_objectives, build_target_objectives
+from .objectives import build_regularization_objectives, build_self_collision_objectives, build_target_objectives
+from .objectives import summarize_self_collision_clearance
 from .postprocess import PostprocessReport, apply_ik_postprocess
 from .robot_spec import RobotSpec
 
@@ -64,6 +65,13 @@ class NewtonIKRetargetSolver:
             raise ValueError("backend robot_spec does not match solver robot_spec.")
         self._reusable_ik_solver = None
         self._reusable_ik_batch_solvers = {}
+        self._self_collision_objectives = build_self_collision_objectives(
+            self.robot_spec,
+            self.config.get("self_collision"),
+        )
+        self._self_collision_pairs = (
+            self._self_collision_objectives[0].self_collision_pairs if self._self_collision_objectives else ()
+        )
 
         self.target_builder = target_builder
         if self.target_builder is None:
@@ -161,6 +169,9 @@ class NewtonIKRetargetSolver:
                 "full_body_tracking": len(tracking_targets.targets),
             },
         }
+        self_collision = self._self_collision_diagnostics(body_state)
+        if self_collision is not None:
+            diagnostics["self_collision"] = self_collision
 
         return IKRetargetFrameResult(
             frame_idx=int(frame_idx),
@@ -210,6 +221,7 @@ class NewtonIKRetargetSolver:
                 damping_weight=self._objective_weight("damping_weight"),
                 previous_joint_pos=previous_joint_pos,
             )
+            objectives += self._self_collision_objectives
             prepared.append(
                 {
                     "target_set": target_set,
@@ -279,6 +291,16 @@ class NewtonIKRetargetSolver:
             if previous_joint_pos is not None:
                 joint_vel = (final_state.joint_pos - previous_joint_pos) / dt
             body_state = self.backend.forward_kinematics(final_state)
+            diagnostics = {
+                "full_body_tracking": _backend_result_diagnostics(result),
+                "fallback_used": bool(fallback_used),
+                "target_counts": {
+                    "full_body_tracking": len(prepared[idx]["target_set"].targets),
+                },
+            }
+            self_collision = self._self_collision_diagnostics(body_state)
+            if self_collision is not None:
+                diagnostics["self_collision"] = self_collision
             frame_results.append(
                 IKRetargetFrameResult(
                     frame_idx=int(frame_idx),
@@ -290,13 +312,7 @@ class NewtonIKRetargetSolver:
                     joint_vel=joint_vel,
                     body_state=body_state,
                     success=bool(result.success),
-                    diagnostics={
-                        "full_body_tracking": _backend_result_diagnostics(result),
-                        "fallback_used": bool(fallback_used),
-                        "target_counts": {
-                            "full_body_tracking": len(prepared[idx]["target_set"].targets),
-                        },
-                    },
+                    diagnostics=diagnostics,
                 )
             )
         return frame_results
@@ -319,6 +335,7 @@ class NewtonIKRetargetSolver:
             damping_weight=self._objective_weight("damping_weight"),
             previous_joint_pos=previous_joint_pos,
         )
+        objectives += self._self_collision_objectives
         settings = self._solve_settings(pass_name)
         result = self._solve_backend_ik(seed_state, objectives, settings)
 
@@ -442,6 +459,16 @@ class NewtonIKRetargetSolver:
     def _objective_weight(self, name: str) -> float:
         return float(self.config["objectives"].get(name, 0.0))
 
+    def _self_collision_diagnostics(self, body_state: RobotBodyState) -> dict | None:
+        if not self._self_collision_pairs:
+            return None
+        return summarize_self_collision_clearance(
+            body_state.body_names,
+            body_state.body_pos_w,
+            body_state.body_quat_xyzw,
+            self._self_collision_pairs,
+        )
+
     @property
     def _fallback_on_failure(self) -> bool:
         return bool(self.config["solver"].get("fallback_on_failure", True))
@@ -512,6 +539,14 @@ def _objective_batch_key(objectives) -> tuple[tuple[Any, ...], ...]:
             )
         elif objective.kind in {"joint_limit", "posture", "smooth", "damping"}:
             key.append((objective.kind, round(float(objective.weight), 10)))
+        elif objective.kind == "self_collision":
+            key.append(
+                (
+                    objective.kind,
+                    round(float(objective.weight), 10),
+                    tuple(pair.layout_key() for pair in (objective.self_collision_pairs or ())),
+                )
+            )
         else:
             key.append((objective.kind, round(float(objective.weight), 10)))
     return tuple(key)

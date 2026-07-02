@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
+import yaml
 
 from conftest import make_canonical_motion
 from retargeter.newton import (
@@ -162,8 +163,29 @@ def test_ik_retarget_solver_single_frame_uses_full_body_tracking_only():
     assert result.body_state.body_pos_w.shape == (len(spec.body_names), 3)
     assert len(backend.calls) == 1
     assert backend.calls[0]["settings"].iterations == 5
+    assert backend.calls[0]["settings"].jacobian_mode == "analytic"
+    assert any(objective.kind == "self_collision" for objective in backend.calls[0]["objectives"])
     assert result.diagnostics["full_body_tracking"]["success"]
+    assert result.diagnostics["self_collision"]["enabled"] is True
     assert result.diagnostics["target_counts"] == {"full_body_tracking": 20}
+
+
+def test_ik_retarget_solver_self_collision_can_be_disabled(tmp_path: Path):
+    config = yaml.safe_load(G1_29_NEWTON.read_text(encoding="utf-8"))
+    config["self_collision"]["enabled"] = False
+    config_path = tmp_path / "g1_no_self_collision.yaml"
+    config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+
+    spec = RobotSpec.from_yaml(G1_29_ROBOT)
+    backend = MockBackend(spec)
+    solver = NewtonIKRetargetSolver(config_path, backend=backend)
+    motion = make_canonical_motion(num_frames=2)
+
+    result = solver.solve_frame(motion, frame_idx=0)
+
+    assert result.success
+    assert all(objective.kind != "self_collision" for objective in backend.calls[0]["objectives"])
+    assert "self_collision" not in result.diagnostics
 
 
 def test_ik_retarget_solver_warm_starts_from_previous_result():
