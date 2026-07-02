@@ -267,6 +267,7 @@ def test_refinement_quality_physical_filter_fails_unsupported_and_low_pelvis_mot
     assert unsupported.valid is True
     assert "support_unavailable" not in unsupported.failures
     assert unsupported.metrics["unsupported_fraction"] == pytest.approx(1.0)
+    assert unsupported.metrics["airborne_frame_count"] == refined.num_frames()
     assert unsupported.thresholds["fail_on_support_unavailable"] is True
 
     long_retargeted = _make_retargeted(spec, frames=45)
@@ -283,6 +284,7 @@ def test_refinement_quality_physical_filter_fails_unsupported_and_low_pelvis_mot
     assert long_unsupported.valid is False
     assert "support_unavailable" in long_unsupported.failures
     assert long_unsupported.metrics["unsupported_fraction"] == pytest.approx(1.0)
+    assert long_unsupported.metrics["airborne_frame_count"] == long_refined.num_frames()
     assert long_unsupported.metrics["unsupported_max_duration_s"] > long_unsupported.thresholds["max_unsupported_duration_s"]
 
     low = _make_refined(retargeted)
@@ -305,6 +307,110 @@ def test_refinement_quality_physical_filter_fails_unsupported_and_low_pelvis_mot
 
     assert enabled_report.valid is False
     assert "pelvis_height_too_low" in enabled_report.failures
+
+
+def test_refinement_quality_support_states_allow_floor_multi_contact():
+    spec = _make_robot_spec()
+    retargeted = _make_retargeted(spec, frames=60)
+    retargeted.root_pos_w[:, 2] = 0.2
+    for body in ("pelvis", "left_knee_link", "right_knee_link", "left_rubber_hand_link", "right_rubber_hand_link"):
+        retargeted.body_pos_w[:, retargeted.body_names.index(body), 2] = 0.0
+    refined = _make_refined(retargeted)
+    ones = np.ones(refined.num_frames(), dtype=np.float64)
+    zeros = np.zeros(refined.num_frames(), dtype=np.float64)
+
+    report = evaluate_refinement_quality(
+        retargeted,
+        refined,
+        spec,
+        config=_loose_quality_config(),
+        contact_score={
+            "left_foot": zeros,
+            "right_foot": zeros,
+            "left_hand": ones,
+            "right_hand": ones,
+            "left_knee": ones,
+            "right_knee": ones,
+            "pelvis": ones,
+        },
+    )
+
+    assert report.valid is True
+    assert report.metrics["support_evaluated"] is True
+    assert report.metrics["multi_contact_support_frame_count"] == refined.num_frames()
+    assert report.metrics["support_state_counts"]["multi_contact_supported"] == refined.num_frames()
+    assert report.metrics["motion_support_profile"] == "floor_multi_contact"
+    assert "support_unavailable" not in report.failures
+
+
+def test_refinement_quality_rejects_low_floor_transition_with_only_foot_support():
+    spec = _make_robot_spec()
+    retargeted = _make_retargeted(spec, frames=60)
+    retargeted.root_pos_w[:, 2] = 0.15
+    for body in ("pelvis", "left_ankle_roll_link", "right_ankle_roll_link", "left_toe_link", "right_toe_link"):
+        retargeted.body_pos_w[:, retargeted.body_names.index(body), 2] = 0.0 if "ankle" in body or "toe" in body else 0.15
+    refined = _make_refined(retargeted)
+    ones = np.ones(refined.num_frames(), dtype=np.float64)
+
+    report = evaluate_refinement_quality(
+        retargeted,
+        refined,
+        spec,
+        config=_loose_quality_config(),
+        contact_score={"left_foot": ones, "right_foot": ones},
+    )
+
+    assert report.valid is False
+    assert report.metrics["support_state_counts"]["foot_supported"] == refined.num_frames()
+    assert report.metrics["foot_only_low_pelvis_max_duration_s"] > report.thresholds["max_foot_only_low_pelvis_duration_s"]
+    assert "floor_transition_without_multicontact" in report.failures
+
+
+def test_refinement_quality_external_support_suspicion_is_diagnostic_by_default():
+    spec = _make_robot_spec()
+    retargeted = _make_retargeted(spec, frames=60)
+    retargeted.root_pos_w[:, 2] = 0.2
+    retargeted.body_pos_w[:, retargeted.body_names.index("pelvis"), 2] = 0.2
+    retargeted.body_pos_w[:, retargeted.body_names.index("left_rubber_hand_link"), 2] = 0.7
+    refined = _make_refined(retargeted)
+    ones = np.ones(refined.num_frames(), dtype=np.float64)
+    config = {
+        **_loose_quality_config(),
+        "physical_feasibility": {
+            "max_unsupported_duration_s": 10.0,
+            "max_airborne_duration_s": 10.0,
+        },
+    }
+
+    report = evaluate_refinement_quality(
+        retargeted,
+        refined,
+        spec,
+        config=config,
+        contact_score={"left_hand": ones},
+    )
+
+    assert report.valid is True
+    assert report.metrics["external_support_suspected"] is True
+    assert "external_support_suspected" not in report.failures
+
+    rejecting_report = evaluate_refinement_quality(
+        retargeted,
+        refined,
+        spec,
+        config={
+            **_loose_quality_config(),
+            "physical_feasibility": {
+                "max_unsupported_duration_s": 10.0,
+                "max_airborne_duration_s": 10.0,
+                "external_support_is_failure": True,
+            },
+        },
+        contact_score={"left_hand": ones},
+    )
+
+    assert rejecting_report.valid is False
+    assert "external_support_suspected" in rejecting_report.failures
 
 
 def test_refinement_quality_physical_filter_fails_base_of_support_violation():
@@ -423,6 +529,10 @@ def _make_robot_spec() -> RobotSpec:
             "right_ankle_roll_link",
             "right_toe_link",
             "torso_link",
+            "left_knee_link",
+            "right_knee_link",
+            "left_rubber_hand_link",
+            "right_rubber_hand_link",
         ],
         actuated_joints=["joint_a", "joint_b"],
         joint_lower_rad=np.array([-1.0, -1.0], dtype=np.float64),
@@ -490,6 +600,10 @@ def _body_offsets() -> np.ndarray:
             [0.1, -0.08, -0.7],
             [0.2, -0.08, -0.7],
             [0.0, 0.0, 0.3],
+            [0.05, 0.08, -0.35],
+            [0.05, -0.08, -0.35],
+            [0.25, 0.25, 0.0],
+            [0.25, -0.25, 0.0],
         ],
         dtype=np.float64,
     )

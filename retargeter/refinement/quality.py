@@ -33,15 +33,35 @@ DEFAULT_PHYSICAL_FEASIBILITY_CONFIG: dict[str, float | bool] = {
     "max_joint_dynamics_violation_duration_s": 0.10,
     "max_foot_penetration_m": 0.03,
     "max_weighted_foot_height_m": 0.18,
+    "enable_multi_contact_support": True,
     "fail_on_pelvis_height": False,
     "min_pelvis_height_m": 0.30,
     "fail_on_support_unavailable": True,
     "support_contact_threshold": 0.5,
     "support_max_foot_height_m": 0.08,
+    "require_multicontact_below_pelvis_height": True,
+    "low_pelvis_requires_multicontact_height_m": 0.25,
+    "max_foot_only_low_pelvis_duration_s": 0.75,
+    "max_airborne_duration_s": 1.25,
     "max_unsupported_duration_s": 1.25,
     "max_unsupported_fraction": 0.35,
     "bos_margin_m": 0.35,
     "max_bos_violation_fraction": 0.50,
+    "external_support_is_failure": False,
+}
+FOOT_SUPPORT_REGIONS = frozenset(("left_foot", "right_foot", "left_toe", "right_toe", "left_heel", "right_heel"))
+SUPPORT_STATES = ("foot_supported", "multi_contact_supported", "airborne", "unsupported", "unknown")
+DEFAULT_SUPPORT_POINTS: dict[str, dict[str, Any]] = {
+    "left_foot": {"bodies": ["left_ankle_roll_link"]},
+    "right_foot": {"bodies": ["right_ankle_roll_link"]},
+    "left_toe": {"bodies": ["left_toe_link"], "optional": True},
+    "right_toe": {"bodies": ["right_toe_link"], "optional": True},
+    "left_heel": {"bodies": ["left_ankle_roll_link"], "optional": True},
+    "right_heel": {"bodies": ["right_ankle_roll_link"], "optional": True},
+    "left_hand": {"bodies": ["left_rubber_hand_link", "left_wrist_yaw_link", "left_hand_link"], "optional": True},
+    "right_hand": {"bodies": ["right_rubber_hand_link", "right_wrist_yaw_link", "right_hand_link"], "optional": True},
+    "left_knee": {"bodies": ["left_knee_link"], "optional": True},
+    "right_knee": {"bodies": ["right_knee_link"], "optional": True},
 }
 EPS = 1.0e-12
 
@@ -80,6 +100,7 @@ def evaluate_refinement_quality(
     report_thresholds = {**thresholds, **physical_thresholds}
     body_names = _body_names(retargeted, refined, config)
     contact_specs = _contact_point_specs(config)
+    support_specs = _support_point_specs(config)
     scores = _contact_score_mapping(contact_score)
     contact_available = scores is not None and bool(scores)
     resolved_ground = _ground_height(refined, contact_score, ground_height)
@@ -118,6 +139,7 @@ def evaluate_refinement_quality(
         failures.append("joint_position_deviation")
 
     contact_points = _contact_points(retargeted, refined, robot_spec, contact_specs, scores)
+    support_points = _support_points(refined, robot_spec, support_specs, scores)
     metrics.update(_contact_metrics(contact_points, float(resolved_ground), float(refined.fps), contact_available))
     if metrics["penetration_worsening_m"] > thresholds["penetration_worsening_tolerance_m"]:
         failures.append("penetration_worsened")
@@ -128,7 +150,7 @@ def evaluate_refinement_quality(
             failures.append("skating_not_improved")
 
     metrics.update(_dynamics_metrics(refined, float(refined.fps), physical_thresholds))
-    metrics.update(_support_metrics(refined, contact_points, float(resolved_ground), physical_thresholds, contact_available))
+    metrics.update(_support_metrics(refined, support_points, float(resolved_ground), physical_thresholds, contact_available))
     metrics["physical_feasibility_enabled"] = bool(physical_thresholds["physical_feasibility_enabled"])
     failures.extend(_physical_feasibility_failures(metrics, physical_thresholds))
     failures = _unique_failures(failures)
@@ -144,6 +166,8 @@ def evaluate_refinement_quality(
             "body_names": list(body_names),
             "contact_regions": [point.region for point in contact_points],
             "contact_point_count": int(len(contact_points)),
+            "support_regions": [point.region for point in support_points],
+            "support_point_count": int(len(support_points)),
         },
     )
 
@@ -153,6 +177,14 @@ class _ContactPoint:
     retargeted_pos_w: np.ndarray
     refined_pos_w: np.ndarray
     score: np.ndarray
+
+
+@dataclass(frozen=True)
+class _SupportPoint:
+    region: str
+    refined_pos_w: np.ndarray
+    score: np.ndarray
+    is_foot: bool
 
 
 def _validate_structure(retargeted: RetargetedMotion, refined: RefinedMotion, robot_spec: RobotSpec) -> None:
@@ -367,7 +399,7 @@ def _dynamics_metrics(refined: RefinedMotion, fps: float, thresholds: Mapping[st
 
 def _support_metrics(
     refined: RefinedMotion,
-    contact_points: list[_ContactPoint],
+    support_points: list[_SupportPoint],
     ground_height: float,
     thresholds: Mapping[str, Any],
     contact_available: bool,
@@ -375,31 +407,49 @@ def _support_metrics(
     pelvis = _pelvis_or_root_pos(refined)
     pelvis_height = np.asarray(pelvis[:, 2], dtype=np.float64)
     frames = int(refined.num_frames())
-    if not contact_available:
-        return {
-            "support_evaluated": False,
-            "pelvis_height_min_m": _finite_min(pelvis_height),
-            "support_frame_count": 0,
-            "unsupported_frame_count": 0,
-            "unsupported_fraction": 0.0,
-            "unsupported_max_duration_s": 0.0,
-            "bos_violation_frame_count": 0,
-            "bos_violation_fraction": 0.0,
-            "bos_violation_max_distance_m": 0.0,
-        }
+    if not contact_available or not support_points:
+        return _empty_support_metrics(pelvis_height, frames, support_evaluated=False, unknown=bool(contact_available))
 
     contact_threshold = float(thresholds["support_contact_threshold"])
     max_foot_height = float(thresholds["support_max_foot_height_m"])
+    multi_contact_enabled = bool(thresholds["enable_multi_contact_support"])
     support_mask = np.zeros((frames,), dtype=bool)
     bos_violation = np.zeros((frames,), dtype=bool)
     bos_distance = np.zeros((frames,), dtype=np.float64)
+    state_masks = {state: np.zeros((frames,), dtype=bool) for state in SUPPORT_STATES}
 
     for frame_idx in range(frames):
+        active_all_xy = []
         support_xy = []
-        for point in contact_points:
+        high_score_count = 0
+        has_non_foot_support = False
+        for point in support_points:
             height = float(point.refined_pos_w[frame_idx, 2] - ground_height)
-            if float(point.score[frame_idx]) >= contact_threshold and abs(height) <= max_foot_height:
+            score = float(point.score[frame_idx])
+            if score < contact_threshold:
+                continue
+            high_score_count += 1
+            if abs(height) > max_foot_height:
+                continue
+            active_all_xy.append(point.refined_pos_w[frame_idx, :2])
+            if point.is_foot:
                 support_xy.append(point.refined_pos_w[frame_idx, :2])
+            else:
+                has_non_foot_support = True
+
+        if active_all_xy and (multi_contact_enabled and has_non_foot_support):
+            support_xy = active_all_xy
+            state_masks["multi_contact_supported"][frame_idx] = True
+        elif support_xy:
+            state_masks["foot_supported"][frame_idx] = True
+        elif active_all_xy and multi_contact_enabled:
+            support_xy = active_all_xy
+            state_masks["multi_contact_supported"][frame_idx] = True
+        elif high_score_count == 0:
+            state_masks["airborne"][frame_idx] = True
+        else:
+            state_masks["unsupported"][frame_idx] = True
+
         if not support_xy:
             continue
         support_mask[frame_idx] = True
@@ -409,6 +459,16 @@ def _support_metrics(
 
     unsupported = ~support_mask
     supported_count = int(np.count_nonzero(support_mask))
+    state_counts = {state: int(np.count_nonzero(mask)) for state, mask in state_masks.items()}
+    state_fractions = {state: float(count / max(frames, 1)) for state, count in state_counts.items()}
+    unsupported_state = state_masks["unsupported"]
+    airborne = state_masks["airborne"]
+    low_pelvis = pelvis_height < float(thresholds["low_pelvis_requires_multicontact_height_m"])
+    foot_only_low_pelvis = state_masks["foot_supported"] & low_pelvis
+    external_support_suspected = bool(
+        state_fractions["unsupported"] > 0.5
+        and _finite_min(pelvis_height) < float(thresholds["min_pelvis_height_m"]) + 0.20
+    )
     return {
         "support_evaluated": True,
         "pelvis_height_min_m": _finite_min(pelvis_height),
@@ -416,9 +476,26 @@ def _support_metrics(
         "unsupported_frame_count": int(np.count_nonzero(unsupported)),
         "unsupported_fraction": float(np.count_nonzero(unsupported) / max(frames, 1)),
         "unsupported_max_duration_s": _max_true_run_duration(unsupported, float(refined.fps)),
+        "unsupported_state_max_duration_s": _max_true_run_duration(unsupported_state, float(refined.fps)),
+        "airborne_frame_count": state_counts["airborne"],
+        "airborne_fraction": state_fractions["airborne"],
+        "airborne_max_duration_s": _max_true_run_duration(airborne, float(refined.fps)),
+        "foot_support_frame_count": state_counts["foot_supported"],
+        "multi_contact_support_frame_count": state_counts["multi_contact_supported"],
+        "low_pelvis_frame_count": int(np.count_nonzero(low_pelvis)),
+        "low_pelvis_fraction": float(np.count_nonzero(low_pelvis) / max(frames, 1)),
+        "foot_only_low_pelvis_frame_count": int(np.count_nonzero(foot_only_low_pelvis)),
+        "foot_only_low_pelvis_fraction": float(np.count_nonzero(foot_only_low_pelvis) / max(frames, 1)),
+        "foot_only_low_pelvis_max_duration_s": _max_true_run_duration(foot_only_low_pelvis, float(refined.fps)),
         "bos_violation_frame_count": int(np.count_nonzero(bos_violation)),
         "bos_violation_fraction": float(np.count_nonzero(bos_violation) / max(supported_count, 1)),
         "bos_violation_max_distance_m": _finite_max(bos_distance[support_mask]) if supported_count else 0.0,
+        "support_state_counts": state_counts,
+        "support_state_fractions": state_fractions,
+        "support_region_count": int(len(support_points)),
+        "support_region_names": [point.region for point in support_points],
+        "motion_support_profile": _motion_support_profile(state_fractions),
+        "external_support_suspected": external_support_suspected,
     }
 
 
@@ -453,11 +530,22 @@ def _physical_feasibility_failures(metrics: Mapping[str, Any], thresholds: Mappi
     if bool(metrics["support_evaluated"]):
         if (
             bool(thresholds["fail_on_support_unavailable"])
-            and float(metrics["unsupported_max_duration_s"]) > float(thresholds["max_unsupported_duration_s"])
+            and (
+                float(metrics["unsupported_state_max_duration_s"]) > float(thresholds["max_unsupported_duration_s"])
+                or float(metrics["airborne_max_duration_s"]) > float(thresholds["max_airborne_duration_s"])
+            )
         ):
             failures.append("support_unavailable")
+        if (
+            bool(thresholds["require_multicontact_below_pelvis_height"])
+            and float(metrics["foot_only_low_pelvis_max_duration_s"])
+            > float(thresholds["max_foot_only_low_pelvis_duration_s"])
+        ):
+            failures.append("floor_transition_without_multicontact")
         if float(metrics["bos_violation_fraction"]) > float(thresholds["max_bos_violation_fraction"]):
             failures.append("base_of_support_violation")
+        if bool(thresholds["external_support_is_failure"]) and bool(metrics["external_support_suspected"]):
+            failures.append("external_support_suspected")
     return failures
 
 
@@ -506,6 +594,43 @@ def _contact_points(
                 retargeted_pos_w=_body_point_w(retargeted.body_pos_w[:, retargeted_idx, :], retargeted.body_quat_xyzw[:, retargeted_idx, :], local_pos),
                 refined_pos_w=_body_point_w(refined.body_pos_w[:, refined_idx, :], refined.body_quat_xyzw[:, refined_idx, :], local_pos),
                 score=score,
+            )
+        )
+    return points
+
+
+def _support_points(
+    refined: RefinedMotion,
+    robot_spec: RobotSpec,
+    specs: Mapping[str, Mapping[str, Any]],
+    scores: Mapping[str, Any] | None,
+) -> list[_SupportPoint]:
+    if scores is None:
+        return []
+    regions = list(scores.keys())
+    body_index = {name: idx for idx, name in enumerate(refined.body_names)}
+    points: list[_SupportPoint] = []
+    for region in regions:
+        if region not in specs:
+            continue
+        spec = specs[region]
+        body = _first_available_support_body(spec, robot_spec, body_index)
+        if body is None:
+            if bool(spec.get("optional", False)):
+                continue
+            candidates = _support_body_candidates(spec)
+            raise ValueError(f"support point region {region!r} references missing bodies {candidates!r}.")
+        local_pos = np.asarray(spec.get("local_pos", [0.0, 0.0, 0.0]), dtype=np.float64)
+        if local_pos.shape != (3,):
+            raise ValueError(f"support point local_pos for region {region!r} must have shape [3], got {local_pos.shape}.")
+        score = _contact_score_array(scores[region], refined.num_frames(), region)
+        refined_idx = body_index[body]
+        points.append(
+            _SupportPoint(
+                region=str(region),
+                refined_pos_w=_body_point_w(refined.body_pos_w[:, refined_idx, :], refined.body_quat_xyzw[:, refined_idx, :], local_pos),
+                score=score,
+                is_foot=str(region) in FOOT_SUPPORT_REGIONS,
             )
         )
     return points
@@ -575,6 +700,44 @@ def _contact_point_specs(config: Mapping[str, Any] | None) -> dict[str, dict[str
     return specs
 
 
+def _support_point_specs(config: Mapping[str, Any] | None) -> dict[str, dict[str, Any]]:
+    specs = {region: copy.deepcopy(value) for region, value in DEFAULT_SUPPORT_POINTS.items()}
+    overrides_list = (
+        _lookup(config, "support_points", None),
+        _cfg(config, "quality", "support_points", None),
+        _cfg(config, "physical_feasibility", "support_points", None),
+    )
+    for overrides in overrides_list:
+        if overrides is None:
+            continue
+        if not isinstance(overrides, Mapping):
+            raise TypeError("support_points must be a mapping.")
+        for region, raw in overrides.items():
+            specs[str(region)] = _parse_support_point_spec(region, raw)
+    return specs
+
+
+def _parse_support_point_spec(region, raw) -> dict[str, Any]:
+    if isinstance(raw, str):
+        return {"bodies": [raw]}
+    if isinstance(raw, Mapping):
+        if "body" in raw:
+            bodies = [str(raw["body"])]
+        elif "bodies" in raw:
+            bodies = [str(name) for name in raw["bodies"]]
+        else:
+            raise ValueError(f"support_points.{region} must define body or bodies.")
+        if not bodies:
+            raise ValueError(f"support_points.{region}.bodies must not be empty.")
+        entry: dict[str, Any] = {"bodies": bodies}
+        if "local_pos" in raw:
+            entry["local_pos"] = raw["local_pos"]
+        if "optional" in raw:
+            entry["optional"] = bool(raw["optional"])
+        return entry
+    raise TypeError(f"support_points.{region} must be a body string or mapping.")
+
+
 def _contact_score_mapping(contact_score) -> Mapping[str, Any] | None:
     if contact_score is None:
         return None
@@ -628,6 +791,72 @@ def _pelvis_or_root_pos(refined: RefinedMotion) -> np.ndarray:
     if "pelvis" in refined.body_names:
         return np.asarray(refined.body_pos_w[:, refined.body_names.index("pelvis"), :], dtype=np.float64)
     return np.asarray(refined.root_pos_w, dtype=np.float64)
+
+
+def _empty_support_metrics(pelvis_height: np.ndarray, frames: int, *, support_evaluated: bool, unknown: bool) -> dict[str, Any]:
+    state_counts = {state: 0 for state in SUPPORT_STATES}
+    if unknown:
+        state_counts["unknown"] = int(frames)
+    state_fractions = {state: float(count / max(frames, 1)) for state, count in state_counts.items()}
+    return {
+        "support_evaluated": bool(support_evaluated),
+        "pelvis_height_min_m": _finite_min(pelvis_height),
+        "support_frame_count": 0,
+        "unsupported_frame_count": 0,
+        "unsupported_fraction": 0.0,
+        "unsupported_max_duration_s": 0.0,
+        "unsupported_state_max_duration_s": 0.0,
+        "airborne_frame_count": 0,
+        "airborne_fraction": 0.0,
+        "airborne_max_duration_s": 0.0,
+        "foot_support_frame_count": 0,
+        "multi_contact_support_frame_count": 0,
+        "low_pelvis_frame_count": 0,
+        "low_pelvis_fraction": 0.0,
+        "foot_only_low_pelvis_frame_count": 0,
+        "foot_only_low_pelvis_fraction": 0.0,
+        "foot_only_low_pelvis_max_duration_s": 0.0,
+        "bos_violation_frame_count": 0,
+        "bos_violation_fraction": 0.0,
+        "bos_violation_max_distance_m": 0.0,
+        "support_state_counts": state_counts,
+        "support_state_fractions": state_fractions,
+        "support_region_count": 0,
+        "support_region_names": [],
+        "motion_support_profile": "unknown" if unknown else "contact_unavailable",
+        "external_support_suspected": False,
+    }
+
+
+def _motion_support_profile(state_fractions: Mapping[str, float]) -> str:
+    if float(state_fractions.get("multi_contact_supported", 0.0)) >= 0.20:
+        return "floor_multi_contact"
+    if float(state_fractions.get("airborne", 0.0)) >= 0.10 and (
+        float(state_fractions.get("foot_supported", 0.0)) + float(state_fractions.get("multi_contact_supported", 0.0))
+    ) >= 0.10:
+        return "airborne_transition"
+    if float(state_fractions.get("foot_supported", 0.0)) >= 0.50:
+        return "foot_supported"
+    if float(state_fractions.get("airborne", 0.0)) >= 0.80:
+        return "airborne"
+    if float(state_fractions.get("unsupported", 0.0)) >= 0.50:
+        return "unsupported"
+    if float(state_fractions.get("unknown", 0.0)) >= 0.50:
+        return "unknown"
+    return "mixed"
+
+
+def _support_body_candidates(spec: Mapping[str, Any]) -> list[str]:
+    if "body" in spec:
+        return [str(spec["body"])]
+    return [str(name) for name in spec.get("bodies", [])]
+
+
+def _first_available_support_body(spec: Mapping[str, Any], robot_spec: RobotSpec, body_index: Mapping[str, int]) -> str | None:
+    for body in _support_body_candidates(spec):
+        if robot_spec.has_body(body) and body in body_index:
+            return body
+    return None
 
 
 def _support_distance_xy(point_xy: np.ndarray, support_xy: np.ndarray) -> float:

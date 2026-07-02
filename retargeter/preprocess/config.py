@@ -105,6 +105,15 @@ PHUMA_SMPLX_FOOT_VERTEX_INDICES: dict[str, list[int]] = {
     ],
 }
 
+DEFAULT_SUPPORT_BODY_NAMES: dict[str, list[str]] = {
+    "left_hand": ["left_hand", "left_wrist"],
+    "right_hand": ["right_hand", "right_wrist"],
+    "left_knee": ["left_knee", "left_shin"],
+    "right_knee": ["right_knee", "right_shin"],
+    "pelvis": ["pelvis", "left_hip", "right_hip"],
+    "torso": ["chest", "torso", "spine", "back"],
+}
+
 
 @dataclass
 class LowPassConfig:
@@ -150,6 +159,9 @@ class ContactConfig:
     foot_vertex_indices: dict[str, list[int]] = field(
         default_factory=lambda: copy.deepcopy(PHUMA_SMPLX_FOOT_VERTEX_INDICES)
     )
+    support_body_names: dict[str, list[str]] = field(
+        default_factory=lambda: copy.deepcopy(DEFAULT_SUPPORT_BODY_NAMES)
+    )
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any] | None) -> "ContactConfig":
@@ -193,4 +205,3 @@ def _dataclass_from_dict(cls: type, data: Mapping[str, Any] | None):
     valid_fields = {f.name for f in fields(cls)}
     kwargs = {k: copy.deepcopy(v) for k, v in data.items() if k in valid_fields}
     return cls(**kwargs)
-

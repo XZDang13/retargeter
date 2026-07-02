@@ -8,7 +8,8 @@ from .canonical import CanonicalHumanMotion
 from .config import ContactConfig
 
 
-CONTACT_REGIONS = ["left_foot", "right_foot", "left_toe", "right_toe", "left_heel", "right_heel"]
+FOOT_CONTACT_REGIONS = ["left_foot", "right_foot", "left_toe", "right_toe", "left_heel", "right_heel"]
+CONTACT_REGIONS = list(FOOT_CONTACT_REGIONS)
 REGION_VERTEX_KEYS = {
     "left_foot": ["left_toe_indices", "left_heel_indices"],
     "right_foot": ["right_toe_indices", "right_heel_indices"],
@@ -41,7 +42,8 @@ class FootContactEstimator:
         missing_regions: list[str] = []
         sources: dict[str, str] = {}
 
-        for region in CONTACT_REGIONS:
+        regions = _ordered_regions(self.config.support_body_names)
+        for region in regions:
             region_data = self._get_region_motion(motion, region)
             if region_data is None:
                 missing_regions.append(region)
@@ -76,7 +78,8 @@ class FootContactEstimator:
             foot_speed=foot_speed,
             ground_height=float(ground_height),
             metadata={
-                "regions": list(CONTACT_REGIONS),
+                "regions": list(regions),
+                "support_regions": [region for region in regions if region not in FOOT_CONTACT_REGIONS],
                 "missing_regions": missing_regions,
                 "sources": sources,
                 "height_threshold": self.config.height_threshold,
@@ -85,7 +88,7 @@ class FootContactEstimator:
         )
 
     def _get_region_motion(self, motion: CanonicalHumanMotion, region: str) -> tuple[np.ndarray, np.ndarray, str] | None:
-        if motion.vertices_w is not None:
+        if motion.vertices_w is not None and region in REGION_VERTEX_KEYS:
             vertex_count = motion.vertices_w.shape[1]
             indices = []
             for key in REGION_VERTEX_KEYS[region]:
@@ -95,9 +98,13 @@ class FootContactEstimator:
                 vertices = motion.vertices_w[:, valid_indices, :]
                 return np.min(vertices[..., 2], axis=1), np.mean(vertices[..., :2], axis=1), "vertices"
 
-        if region in motion.body_names:
-            pos = motion.get_body_pos(region)
-            return pos[:, 2], pos[:, :2], "bodies"
+        aliases = self.config.support_body_names.get(region, [region])
+        present = [name for name in aliases if name in motion.body_names]
+        if region in motion.body_names and region not in present:
+            present.insert(0, region)
+        if present:
+            positions = np.stack([motion.get_body_pos(name) for name in present], axis=1)
+            return np.min(positions[..., 2], axis=1), np.mean(positions[..., :2], axis=1), "bodies"
 
         return None
 
@@ -126,9 +133,16 @@ def _smooth_binary(binary: np.ndarray, window: int) -> np.ndarray:
     return out
 
 
+def _ordered_regions(support_body_names: dict[str, list[str]]) -> list[str]:
+    regions = list(FOOT_CONTACT_REGIONS)
+    for region in support_body_names:
+        if region not in regions:
+            regions.append(str(region))
+    return regions
+
+
 def _valid_indices(indices: list[int], vertex_count: int) -> np.ndarray:
     arr = np.asarray(indices, dtype=np.int64)
     if arr.size == 0:
         return arr
     return arr[(arr >= 0) & (arr < vertex_count)]
-
