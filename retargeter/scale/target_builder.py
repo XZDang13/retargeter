@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Literal
 
@@ -26,9 +27,11 @@ class IKTargetBuilder:
         self.target_config_path = Path(target_config_path)
         self.target_config = _load_yaml(self.target_config_path)
         _validate_target_config(self.target_config, self.target_config_path)
-        self._scaled_motion_cache_key: tuple[int, int, float] | None = None
-        self._scaled_motion_cache_source: CanonicalHumanMotion | None = None
-        self._scaled_motion_cache: CanonicalHumanMotion | None = None
+        self._scaled_motion_cache_max_entries = 64
+        self._scaled_motion_cache: OrderedDict[
+            tuple[int, int, float, tuple[int, ...], tuple[int, ...]],
+            tuple[CanonicalHumanMotion, CanonicalHumanMotion],
+        ] = OrderedDict()
 
     def build(
         self,
@@ -127,17 +130,25 @@ class IKTargetBuilder:
         return target_set
 
     def _scale_motion_cached(self, motion: CanonicalHumanMotion) -> CanonicalHumanMotion:
-        cache_key = (id(motion), motion.num_frames(), float(motion.fps))
-        if (
-            self._scaled_motion_cache_key == cache_key
-            and self._scaled_motion_cache_source is motion
-            and self._scaled_motion_cache is not None
-        ):
-            return self._scaled_motion_cache
+        cache_key = (
+            id(motion),
+            motion.num_frames(),
+            float(motion.fps),
+            tuple(int(value) for value in motion.body_pos_w.shape),
+            tuple(int(value) for value in motion.body_quat_xyzw.shape),
+        )
+        cached = self._scaled_motion_cache.get(cache_key)
+        if cached is not None:
+            source, scaled_motion = cached
+            if source is motion:
+                self._scaled_motion_cache.move_to_end(cache_key)
+                return scaled_motion
+            self._scaled_motion_cache.pop(cache_key, None)
         scaled_motion = self.scaler.scale_motion(motion)
-        self._scaled_motion_cache_key = cache_key
-        self._scaled_motion_cache_source = motion
-        self._scaled_motion_cache = scaled_motion
+        self._scaled_motion_cache[cache_key] = (motion, scaled_motion)
+        self._scaled_motion_cache.move_to_end(cache_key)
+        while len(self._scaled_motion_cache) > self._scaled_motion_cache_max_entries:
+            self._scaled_motion_cache.popitem(last=False)
         return scaled_motion
 
     def required_robot_body_names(self, pass_name: IKPassName | None = None) -> list[str]:

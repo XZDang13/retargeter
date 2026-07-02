@@ -1,7 +1,6 @@
 """Retargeting utilities."""
 
 from .newton import (
-    BatchSequenceIKRetargetRunner,
     IKRetargetFrameResult,
     NewtonBackend,
     NewtonIKRetargetSolver,
@@ -31,7 +30,6 @@ from .scale import BodyIKTarget, HumanToRobotScaler, IKTargetBuilder, IKTargetSe
 
 __all__ = [
     "BodyIKTarget",
-    "BatchSequenceIKRetargetRunner",
     "HumanToRobotScaler",
     "IKRetargetFrameResult",
     "IKTargetBuilder",

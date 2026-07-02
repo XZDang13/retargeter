@@ -43,8 +43,6 @@ def main(argv: list[str] | None = None, *, backend_factory=None, refinement_fk_f
         assigned_devices = (
             [assign_device(index, gpu_ids, args.processes_per_gpu) for index in range(max(args.workers, 1))] if gpu_ids else None
         )
-        worker_devices = None if args.native_batch else assigned_devices
-        refinement_device = assigned_devices[0] if args.native_batch and assigned_devices else None
         batch_result = pipeline.run_batch(
             input_paths=input_paths,
             output_dir=args.output,
@@ -69,13 +67,7 @@ def main(argv: list[str] | None = None, *, backend_factory=None, refinement_fk_f
             preserve_tree=bool(args.preserve_tree),
             dry_run=bool(args.dry_run),
             summary_csv=args.summary_csv,
-            worker_devices=worker_devices,
-            refinement_device=refinement_device,
-            native_batch=bool(args.native_batch),
-            batch_size=int(args.batch_size),
-            preprocess_workers=int(args.preprocess_workers),
-            batch_order=args.batch_order,
-            batch_frame_budget=None if int(args.batch_frame_budget) == 0 else int(args.batch_frame_budget),
+            worker_devices=assigned_devices,
             progress=progress,
         )
         print(batch_result.manifest_path)
@@ -150,33 +142,11 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--recursive", action="store_true", help="Recursively discover --input-dir files.")
     parser.add_argument("--fail-fast", action="store_true", help="Stop a batch run after the first failed item.")
-    parser.add_argument("--workers", type=int, default=1, help="Number of batch worker processes.")
-    parser.add_argument("--batch-size", type=int, default=8, help="Native batch microbatch size.")
     parser.add_argument(
-        "--batch-order",
-        choices=["length", "length-desc", "length-asc", "input"],
-        default="length",
-        help="Native batch grouping order. 'length'/'length-desc' runs long clips first; 'length-asc' runs short clips first; 'input' preserves input order.",
-    )
-    parser.add_argument(
-        "--batch-frame-budget",
-        type=int,
-        default=12000,
-        help="Max estimated post-resample frames per native microbatch. Use 0 to disable.",
-    )
-    parser.add_argument(
-        "--preprocess-workers",
+        "--workers",
         type=int,
         default=1,
-        help="Number of native batch preprocessing worker processes.",
-    )
-    parser.set_defaults(native_batch=True)
-    parser.add_argument("--native-batch", dest="native_batch", action="store_true", help="Use native solver-level batch mode.")
-    parser.add_argument(
-        "--no-native-batch",
-        dest="native_batch",
-        action="store_false",
-        help="Use the legacy per-item worker batch path.",
+        help="Number of independent batch worker processes. Values >1 use the multiprocessing path by default.",
     )
     parser.add_argument("--gpu-ids", default=None, help="Comma-separated GPU ids for batch workers, e.g. 0,1,2.")
     parser.add_argument("--processes-per-gpu", type=int, default=1, help="Batch worker slots per GPU id.")
@@ -255,16 +225,8 @@ def _validate_input_mode(parser: argparse.ArgumentParser, args: argparse.Namespa
         parser.error("--workers must be positive.")
     if args.processes_per_gpu <= 0:
         parser.error("--processes-per-gpu must be positive.")
-    if args.batch_size <= 0:
-        parser.error("--batch-size must be positive.")
-    if args.batch_frame_budget < 0:
-        parser.error("--batch-frame-budget must be non-negative.")
-    if args.preprocess_workers <= 0:
-        parser.error("--preprocess-workers must be positive.")
     if args.min_motion_frames <= 0:
         parser.error("--min-motion-frames must be positive.")
-    if batch_mode and not args.native_batch and args.preprocess_workers != 1:
-        parser.error("--preprocess-workers is only supported with native batch mode. Use --workers with --no-native-batch.")
 
 
 if __name__ == "__main__":

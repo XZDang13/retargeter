@@ -92,7 +92,7 @@ Refinement quality includes a post-refine physical feasibility gate for joint li
 
 Refine progress uses `tqdm` on stderr. `--progress auto` is the default and shows bars in interactive terminals; use `--progress on` to force progress in logs or `--progress off` for quiet scripting.
 
-Batch refine writes one standard refine directory per clip. By default it uses native solver-level microbatches for Newton IK and Torch refinement while keeping quality, export, and manifest records per clip. Native batches are grouped by estimated post-resample frame count so similar-length clips share a padded batch, and long clips run first. `--batch-size` is the maximum clip count per native microbatch; `--batch-frame-budget` caps the estimated total post-resample frames in a microbatch so very long CMU clips do not all land in one Newton IK batch. Pass `--batch-order input` only when you need old input-order grouping. Use `--preprocess-workers` to fan out SMPL/SMPL-X loading, resampling, FK, contact, and `human.npz` export before each microbatch. Pass `--no-native-batch` with `--workers` only when you want the legacy per-item multiprocessing wrapper.
+Batch refine writes one standard refine directory per clip. Batch execution uses independent worker processes: `--workers N` runs up to `N` clips at the same time, with each worker creating its own pipeline and Newton backend. This is the production batch path for dataset processing; solver-level native microbatching is not used.
 
 ```bash
 PYTHONPATH=. python -m retargeter.cli.refine \
@@ -102,9 +102,7 @@ PYTHONPATH=. python -m retargeter.cli.refine \
   --target-fps 30 \
   --robot g1_29 \
   --refinement-iterations 50 \
-  --batch-size 8 \
-  --batch-frame-budget 12000 \
-  --preprocess-workers 4 \
+  --workers 4 \
   --gpu-ids 0 \
   --resume \
   --skip-existing \
@@ -113,8 +111,6 @@ PYTHONPATH=. python -m retargeter.cli.refine \
 ```
 
 Batch inputs can also come from `--inputs` or a newline-separated `--input-list`. `--input-dir` auto-detects `.npz` files by default and uses a structural motion filter to skip template/calibration files such as CMU `neutral_stagei.npz`: accepted files must look like SMPL/SMPL-X motion sequences with time-series translation and pose arrays. Use `--motion-filter off` to disable this, and use repeatable `--input-pattern` only when you want a different or additional glob. Batch outputs are written under `outputs/refine_batch/<input_stem>/` by default; duplicate stems use `__2`, `__3`, and so on. With `--preserve-tree`, files discovered under `--input-dir` keep their relative directory layout under the output root.
-
-In native batch mode, `--gpu-ids` selects the refinement device, while SMPL/SMPL-X preprocessing still uses `--device`.
 
 The restartable manifest is written incrementally to `outputs/refine_batch/batch_manifest.json`. Batch mode also writes `outputs/refine_batch/batch_results.csv` with one row per clip and a `decision` column marked `pass` or `reject` for completed items. Use `--dry-run` to write planned `pending` rows without retargeting, `--summary-csv` for an additional compact table, and `--fail-fast` to stop after the first failed item. By default the CLI continues after item failures and exits nonzero only if at least one item failed; quality-invalid items are rejected/recorded without making the batch command fail.
 

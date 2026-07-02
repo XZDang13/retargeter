@@ -601,6 +601,28 @@ def test_refine_cli_explicit_input_can_still_include_neutral_stagei(tmp_path: Pa
     assert manifest["items"][0]["input"] == str(neutral.resolve())
 
 
+def test_refine_cli_workers_use_multiprocessing_path_by_default(tmp_path: Path):
+    output = tmp_path / "workers_dry_run"
+
+    assert refine.main(
+        [
+            "--inputs",
+            "mock",
+            "mock",
+            "--output",
+            str(output),
+            "--workers",
+            "2",
+            "--dry-run",
+        ]
+    ) == 0
+
+    manifest = json.loads((output / "batch_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["input_count"] == 2
+    assert [item["status"] for item in manifest["items"]] == ["pending", "pending"]
+    assert not (output / "batch_plan.json").exists()
+
+
 def test_refine_pipeline_run_batch_returns_lightweight_results(tmp_path: Path):
     result = RefinePipeline(
         robot="g1_29",
@@ -624,6 +646,21 @@ def test_refine_pipeline_run_batch_returns_lightweight_results(tmp_path: Path):
     assert all((item.output_dir / "final_motion.npz").exists() for item in result.items)
     assert all("retargeted_motion" not in item.paths for item in result.items)
     assert all(not (item.output_dir / "retargeted_motion.npz").exists() for item in result.items)
+
+
+def test_refine_pipeline_run_batch_workers_default_to_multiprocessing_path(tmp_path: Path):
+    output = tmp_path / "api_workers_dry_run"
+    result = RefinePipeline(robot="g1_29").run_batch(
+        input_paths=["mock", "mock"],
+        output_dir=output,
+        workers=2,
+        dry_run=True,
+    )
+
+    assert result.manifest_path == output / "batch_manifest.json"
+    assert not (output / "batch_plan.json").exists()
+    assert [item.success for item in result.items] == [False, False]
+    assert [item.error_type for item in result.items] == [None, None]
 
 
 def test_refine_rejects_invalid_quality_without_error_unless_allowed(tmp_path: Path):

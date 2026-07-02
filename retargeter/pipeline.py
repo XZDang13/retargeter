@@ -395,33 +395,19 @@ class RefinePipeline:
         summary_csv: Path | str | None = None,
         worker_devices: Sequence[str] | None = None,
         refinement_device: str | None = None,
-        native_batch: bool = True,
-        batch_size: int = 8,
-        preprocess_workers: int = 1,
-        batch_order: str = "length",
-        batch_frame_budget: int | None = 12000,
         progress: ProgressReporter | None = None,
     ) -> RefineBatchResult:
         reporter = get_progress(progress)
         inputs = list(input_paths)
         if not inputs:
             raise ValueError("run_batch requires at least one input path.")
-        if batch_size <= 0:
-            raise ValueError("batch_size must be positive.")
-        if preprocess_workers <= 0:
-            raise ValueError("preprocess_workers must be positive.")
-        if batch_order not in {"input", "length", "length-desc", "length-asc"}:
-            raise ValueError("batch_order must be 'input', 'length', 'length-desc', or 'length-asc'.")
-        if batch_frame_budget is not None and batch_frame_budget <= 0:
-            raise ValueError("batch_frame_budget must be positive when set.")
+        if workers <= 0:
+            raise ValueError("workers must be positive.")
 
         if workers > 1 and (self.backend_factory is not None or self.refinement_fk_factory is not None):
             raise ValueError("Injected backend/refinement factories are only supported for workers=1.")
-        if preprocess_workers > 1 and not native_batch:
-            raise ValueError("preprocess_workers is only supported with native_batch=True.")
 
         from retargeter.batch.manifest import summarize, write_pass_reject_csv, write_summary_csv
-        from retargeter.batch.native import NativeBatchRefineRunner
         from retargeter.batch.runner import BatchRefineRunner, build_refine_batch_tasks
         from retargeter.batch.worker import make_refine_task_processor, process_refine_batch_task
 
@@ -450,55 +436,32 @@ class RefinePipeline:
             preserve_tree=preserve_tree,
             worker_devices=worker_devices,
         )
-        use_native_batch = bool(native_batch) and self.backend_factory is None and self.refinement_fk_factory is None
-        if preprocess_workers > 1 and not use_native_batch:
-            raise ValueError("preprocess_workers is only supported by the native batch runner.")
-        if use_native_batch:
-            runner = NativeBatchRefineRunner(
-                manifest_path=Path(output_dir) / "batch_manifest.json",
-                robot=self.robot,
-                allow_invalid=allow_invalid,
+        nested_progress = reporter.child(position_offset=1) if workers == 1 and reporter.enabled and reporter.forced else None
+        task_processor = (
+            make_refine_task_processor(
+                backend_factory=self.backend_factory,
+                refinement_fk_factory=self.refinement_fk_factory,
+                progress=nested_progress,
             )
-            manifest = runner.run(
-                tasks,
-                batch_size=batch_size,
-                fail_fast=fail_fast,
-                resume=resume,
-                skip_existing=skip_existing,
-                overwrite=overwrite,
-                dry_run=dry_run,
-                preprocess_workers=preprocess_workers,
-                batch_order=batch_order,
-                batch_frame_budget=batch_frame_budget,
-                progress=reporter,
-            )
-        else:
-            nested_progress = reporter.child(position_offset=1) if workers == 1 and reporter.enabled and reporter.forced else None
-            task_processor = (
-                make_refine_task_processor(
-                    backend_factory=self.backend_factory,
-                    refinement_fk_factory=self.refinement_fk_factory,
-                    progress=nested_progress,
-                )
-                if self.backend_factory is not None or self.refinement_fk_factory is not None or nested_progress is not None
-                else process_refine_batch_task
-            )
-            runner = BatchRefineRunner(
-                manifest_path=Path(output_dir) / "batch_manifest.json",
-                robot=self.robot,
-                allow_invalid=allow_invalid,
-                task_processor=task_processor,
-            )
-            manifest = runner.run(
-                tasks,
-                workers=workers,
-                fail_fast=fail_fast,
-                resume=resume,
-                skip_existing=skip_existing,
-                overwrite=overwrite,
-                dry_run=dry_run,
-                progress=reporter,
-            )
+            if self.backend_factory is not None or self.refinement_fk_factory is not None or nested_progress is not None
+            else process_refine_batch_task
+        )
+        runner = BatchRefineRunner(
+            manifest_path=Path(output_dir) / "batch_manifest.json",
+            robot=self.robot,
+            allow_invalid=allow_invalid,
+            task_processor=task_processor,
+        )
+        manifest = runner.run(
+            tasks,
+            workers=workers,
+            fail_fast=fail_fast,
+            resume=resume,
+            skip_existing=skip_existing,
+            overwrite=overwrite,
+            dry_run=dry_run,
+            progress=reporter,
+        )
         if summary_csv is not None:
             write_summary_csv(summary_csv, manifest)
         results_csv_path = write_pass_reject_csv(Path(output_dir) / "batch_results.csv", manifest)

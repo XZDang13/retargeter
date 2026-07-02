@@ -113,6 +113,16 @@ class IKJointTargetObjective(ik.IKObjective):
             device=self.device,
         )
 
+    def set_targets(self, target_q: np.ndarray) -> None:
+        values = np.asarray(target_q, dtype=np.float32)
+        expected = (self.target_q_np.shape[0], self.n_dofs)
+        if values.shape != expected:
+            raise ValueError(f"target_q must have shape {expected}, got {values.shape}.")
+        if self.target_q is None:
+            self.target_q_np[...] = values
+            return
+        self.target_q.assign(values)
+
     def set_weight(self, value: float) -> None:
         wp.launch(_update_joint_target_weight, dim=1, inputs=[float(value)], outputs=[self._weight], device=self.device)
 

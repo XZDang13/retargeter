@@ -7,7 +7,6 @@ import yaml
 
 from conftest import make_canonical_motion
 from retargeter.newton import (
-    BatchSequenceIKRetargetRunner,
     BackendSolveResult,
     IKState,
     NewtonSolveSettings,
@@ -101,53 +100,6 @@ class MockReusableBackend(MockBackend):
     def create_reusable_solver(self, objectives, settings: NewtonSolveSettings) -> MockReusableSolver:
         self.reusable_builds += 1
         return MockReusableSolver(self)
-
-
-class MockReusableBatchSolver:
-    def __init__(self, backend: "MockBatchBackend", problem_count: int):
-        self.backend = backend
-        self.problem_count = problem_count
-
-    def compatible(self, objectives_by_problem, settings: NewtonSolveSettings) -> bool:
-        return len(objectives_by_problem) == self.problem_count
-
-    def solve(self, seed_states, objectives_by_problem, settings: NewtonSolveSettings) -> list[BackendSolveResult]:
-        call_index = len(self.backend.batch_calls)
-        self.backend.batch_calls.append(
-            {
-                "problem_count": len(seed_states),
-                "objectives_by_problem": [list(objectives) for objectives in objectives_by_problem],
-                "settings": settings,
-            }
-        )
-        results = []
-        for problem_index, seed_state in enumerate(seed_states):
-            q = seed_state.joint_pos.copy() + self.backend.joint_delta * (call_index + 1) * (problem_index + 1)
-            results.append(
-                BackendSolveResult(
-                    state=IKState(
-                        root_pos_w=seed_state.root_pos_w.copy(),
-                        root_quat_xyzw=seed_state.root_quat_xyzw.copy(),
-                        joint_pos=q,
-                    ),
-                    success=True,
-                    cost=float(call_index),
-                    iterations=settings.iterations,
-                    diagnostics={"mock_batch_call_index": call_index, "batch_problem_index": problem_index},
-                )
-            )
-        return results
-
-
-class MockBatchBackend(MockBackend):
-    def __init__(self, robot_spec: RobotSpec, *, joint_delta: float = 0.001):
-        super().__init__(robot_spec, joint_delta=joint_delta)
-        self.batch_builds = 0
-        self.batch_calls = []
-
-    def create_reusable_batch_solver(self, objectives_by_problem, settings: NewtonSolveSettings) -> MockReusableBatchSolver:
-        self.batch_builds += 1
-        return MockReusableBatchSolver(self, len(objectives_by_problem))
 
 
 def test_ik_retarget_solver_single_frame_uses_full_body_tracking_only():
@@ -245,21 +197,6 @@ def test_sequence_runner_reuses_backend_solver_when_available():
     assert len(backend.reusable_calls) == 5
     assert backend.calls == []
     assert retargeted_motion.diagnostics[0]["full_body_tracking"]["diagnostics"]["reused_solver"] is True
-
-
-def test_batch_sequence_runner_uses_native_batch_for_overlapping_frames():
-    spec = RobotSpec.from_yaml(G1_29_ROBOT)
-    backend = MockBatchBackend(spec, joint_delta=0.001)
-    solver = NewtonIKRetargetSolver(G1_29_NEWTON, backend=backend)
-    motions = [make_canonical_motion(num_frames=3), make_canonical_motion(num_frames=2)]
-
-    outputs = BatchSequenceIKRetargetRunner(solver).run(motions)
-
-    assert [motion.num_frames() for motion in outputs] == [3, 2]
-    assert [call["problem_count"] for call in backend.batch_calls] == [2, 2]
-    assert len(backend.calls) == 1
-    assert backend.batch_builds == 2
-    assert all(output.metadata["native_batch"] is True for output in outputs)
 
 
 def test_online_runner_steps_and_resets_state():

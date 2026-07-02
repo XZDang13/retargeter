@@ -98,31 +98,6 @@ class NewtonIKRetargetSolver:
             previous_result=previous_result,
         )
 
-    def solve_frames_batch(
-        self,
-        motions: list[CanonicalHumanMotion],
-        frame_idx: int,
-        *,
-        contact_results: list[FootContactResult | None] | None = None,
-        previous_results: list[IKRetargetFrameResult | None] | None = None,
-    ) -> list[IKRetargetFrameResult]:
-        if not motions:
-            return []
-        contacts = contact_results if contact_results is not None else [None] * len(motions)
-        previous = previous_results if previous_results is not None else [None] * len(motions)
-        if len(contacts) != len(motions) or len(previous) != len(motions):
-            raise ValueError("motions, contact_results, and previous_results must have the same length.")
-        target_sets = [
-            self.target_builder.build(motion, frame_idx, "full_body_tracking", contact_result=contact)
-            for motion, contact in zip(motions, contacts)
-        ]
-        return self.solve_target_sets_batch(
-            target_sets,
-            frame_idx=frame_idx,
-            fps_values=[float(motion.fps) for motion in motions],
-            previous_results=previous,
-        )
-
     def solve_target_sets(
         self,
         tracking_targets: IKTargetSet,
@@ -185,137 +160,6 @@ class NewtonIKRetargetSolver:
             success=success,
             diagnostics=diagnostics,
         )
-
-    def solve_target_sets_batch(
-        self,
-        tracking_targets: list[IKTargetSet],
-        *,
-        frame_idx: int,
-        fps_values: list[float],
-        previous_results: list[IKRetargetFrameResult | None] | None = None,
-    ) -> list[IKRetargetFrameResult]:
-        if not tracking_targets:
-            return []
-        if len(fps_values) != len(tracking_targets):
-            raise ValueError("fps_values must match tracking_targets length.")
-        previous = previous_results if previous_results is not None else [None] * len(tracking_targets)
-        if len(previous) != len(tracking_targets):
-            raise ValueError("previous_results must match tracking_targets length.")
-
-        prepared: list[dict[str, Any]] = []
-        groups: dict[tuple[tuple[Any, ...], ...], list[int]] = {}
-        for index, (target_set, fps, previous_result) in enumerate(zip(tracking_targets, fps_values, previous)):
-            target_set = _target_set_with_pass_name(target_set, "full_body_tracking")
-            target_set.validate()
-            if fps <= 0.0 or not np.isfinite(fps):
-                raise ValueError(f"fps must be positive and finite, got {fps!r}.")
-            previous_state = previous_result.state() if previous_result is not None else None
-            previous_joint_pos = previous_state.joint_pos if previous_state is not None else None
-            seed_state = self._initial_state(target_set, previous_state)
-            objectives = build_target_objectives(target_set, self.robot_spec)
-            objectives += build_regularization_objectives(
-                self.robot_spec,
-                joint_limit_weight=self._objective_weight("joint_limit_weight"),
-                posture_weight=self._objective_weight("posture_weight"),
-                smooth_weight=self._objective_weight("smooth_weight"),
-                damping_weight=self._objective_weight("damping_weight"),
-                previous_joint_pos=previous_joint_pos,
-            )
-            objectives += self._self_collision_objectives
-            prepared.append(
-                {
-                    "target_set": target_set,
-                    "fps": float(fps),
-                    "previous_joint_pos": previous_joint_pos,
-                    "seed_state": seed_state,
-                    "objectives": objectives,
-                }
-            )
-            groups.setdefault(_objective_batch_key(objectives), []).append(index)
-
-        pass_results: list[BackendSolveResult | None] = [None] * len(prepared)
-        settings = self._solve_settings("full_body_tracking")
-        for indices in groups.values():
-            if len(indices) <= 1:
-                idx = indices[0]
-                pass_results[idx] = self._solve_pass(
-                    prepared[idx]["target_set"],
-                    prepared[idx]["seed_state"],
-                    pass_name="full_body_tracking",
-                    previous_joint_pos=prepared[idx]["previous_joint_pos"],
-                    dt=1.0 / prepared[idx]["fps"],
-                )
-                continue
-            seed_states = [prepared[idx]["seed_state"] for idx in indices]
-            objectives_by_problem = [prepared[idx]["objectives"] for idx in indices]
-            raw_results = self._solve_backend_ik_batch(seed_states, objectives_by_problem, settings)
-            for local_index, idx in enumerate(indices):
-                result = raw_results[local_index]
-                q, report = apply_ik_postprocess(
-                    result.state.joint_pos,
-                    self.robot_spec,
-                    previous_joint_pos=prepared[idx]["previous_joint_pos"],
-                    dt=1.0 / prepared[idx]["fps"],
-                    clamp_limits=bool(self.config["postprocess"].get("clamp_joint_limits", True)),
-                    clamp_velocity=bool(self.config["postprocess"].get("clamp_velocity", True)),
-                    velocity_scale=float(self.config["postprocess"].get("velocity_limit_scale", 1.0)),
-                )
-                state = IKState(
-                    root_pos_w=result.state.root_pos_w.copy(),
-                    root_quat_xyzw=normalize_quat_xyzw(result.state.root_quat_xyzw).copy(),
-                    joint_pos=q,
-                )
-                diagnostics = dict(result.diagnostics)
-                diagnostics["postprocess"] = _postprocess_report_dict(report)
-                pass_results[idx] = BackendSolveResult(
-                    state=state,
-                    success=bool(result.success),
-                    cost=result.cost,
-                    iterations=result.iterations,
-                    diagnostics=diagnostics,
-                )
-
-        frame_results: list[IKRetargetFrameResult] = []
-        for idx, result in enumerate(pass_results):
-            if result is None:
-                raise RuntimeError("Internal error: missing batched IK result.")
-            previous_joint_pos = prepared[idx]["previous_joint_pos"]
-            dt = 1.0 / prepared[idx]["fps"]
-            final_state = result.state
-            fallback_used = False
-            if not result.success and self._fallback_on_failure:
-                final_state = prepared[idx]["seed_state"]
-                fallback_used = True
-            final_state = final_state.copy()
-            joint_vel = np.zeros(self.robot_spec.num_dofs, dtype=np.float64)
-            if previous_joint_pos is not None:
-                joint_vel = (final_state.joint_pos - previous_joint_pos) / dt
-            body_state = self.backend.forward_kinematics(final_state)
-            diagnostics = {
-                "full_body_tracking": _backend_result_diagnostics(result),
-                "fallback_used": bool(fallback_used),
-                "target_counts": {
-                    "full_body_tracking": len(prepared[idx]["target_set"].targets),
-                },
-            }
-            self_collision = self._self_collision_diagnostics(body_state)
-            if self_collision is not None:
-                diagnostics["self_collision"] = self_collision
-            frame_results.append(
-                IKRetargetFrameResult(
-                    frame_idx=int(frame_idx),
-                    robot=self.robot_spec.robot,
-                    root_pos_w=final_state.root_pos_w.copy(),
-                    root_quat_xyzw=normalize_quat_xyzw(final_state.root_quat_xyzw).copy(),
-                    joint_names=list(self.robot_spec.actuated_joints),
-                    joint_pos=final_state.joint_pos.copy(),
-                    joint_vel=joint_vel,
-                    body_state=body_state,
-                    success=bool(result.success),
-                    diagnostics=diagnostics,
-                )
-            )
-        return frame_results
 
     def _solve_pass(
         self,
@@ -382,43 +226,6 @@ class NewtonIKRetargetSolver:
         except Exception:
             self._reusable_ik_solver = None
             return self.backend.solve_ik(seed_state, objectives, settings)
-
-    def _solve_backend_ik_batch(
-        self,
-        seed_states: list[IKState],
-        objectives_by_problem: list[list[Any]],
-        settings: NewtonSolveSettings,
-    ) -> list[BackendSolveResult]:
-        factory = getattr(self.backend, "create_reusable_batch_solver", None)
-        if factory is None:
-            batch_solver = getattr(self.backend, "solve_ik_batch", None)
-            if batch_solver is None:
-                return [
-                    self._solve_backend_ik(seed_state, objectives, settings)
-                    for seed_state, objectives in zip(seed_states, objectives_by_problem)
-                ]
-            return batch_solver(seed_states, objectives_by_problem, settings)
-
-        cache = getattr(self, "_reusable_ik_batch_solvers", None)
-        if cache is None:
-            cache = {}
-            self._reusable_ik_batch_solvers = cache
-        key = (len(seed_states), _objective_batch_key(objectives_by_problem[0]), _settings_batch_key(settings))
-        reusable = cache.get(key)
-        try:
-            if reusable is None or not reusable.compatible(objectives_by_problem, settings):
-                reusable = factory(objectives_by_problem, settings)
-                cache[key] = reusable
-            return reusable.solve(seed_states, objectives_by_problem, settings)
-        except Exception:
-            cache.pop(key, None)
-            batch_solver = getattr(self.backend, "solve_ik_batch", None)
-            if batch_solver is not None:
-                return batch_solver(seed_states, objectives_by_problem, settings)
-            return [
-                self._solve_backend_ik(seed_state, objectives, settings)
-                for seed_state, objectives in zip(seed_states, objectives_by_problem)
-            ]
 
     def _initial_state(self, target_set: IKTargetSet, previous_state: IKState | None) -> IKState:
         if previous_state is not None:
@@ -513,56 +320,6 @@ def _postprocess_report_dict(report: PostprocessReport) -> dict[str, Any]:
         "max_velocity_before": float(report.max_velocity_before),
         "metadata": dict(report.metadata),
     }
-
-
-def _objective_batch_key(objectives) -> tuple[tuple[Any, ...], ...]:
-    key: list[tuple[Any, ...]] = []
-    for objective in objectives:
-        if objective.kind == "position":
-            key.append(
-                (
-                    objective.kind,
-                    objective.body_name,
-                    objective.semantic_name,
-                    _float_tuple(objective.body_local_pos, 3),
-                    round(float(objective.weight), 10),
-                )
-            )
-        elif objective.kind == "rotation":
-            key.append(
-                (
-                    objective.kind,
-                    objective.body_name,
-                    objective.semantic_name,
-                    round(float(objective.weight), 10),
-                )
-            )
-        elif objective.kind in {"joint_limit", "posture", "smooth", "damping"}:
-            key.append((objective.kind, round(float(objective.weight), 10)))
-        elif objective.kind == "self_collision":
-            key.append(
-                (
-                    objective.kind,
-                    round(float(objective.weight), 10),
-                    tuple(pair.layout_key() for pair in (objective.self_collision_pairs or ())),
-                )
-            )
-        else:
-            key.append((objective.kind, round(float(objective.weight), 10)))
-    return tuple(key)
-
-
-def _settings_batch_key(settings: NewtonSolveSettings) -> tuple[str, str, float]:
-    return (str(settings.optimizer), str(settings.jacobian_mode), float(settings.lambda_initial))
-
-
-def _float_tuple(value: np.ndarray | None, size: int) -> tuple[float, ...] | None:
-    if value is None:
-        return None
-    arr = np.asarray(value, dtype=np.float64)
-    if arr.shape != (size,):
-        return None
-    return tuple(round(float(item), 10) for item in arr)
 
 
 def _load_yaml(path: Path) -> dict[str, Any]:

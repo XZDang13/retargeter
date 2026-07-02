@@ -12,7 +12,6 @@ from .manifest import (
     write_pass_reject_csv,
     write_summary_csv,
 )
-from .native import NativeBatchRefineRunner
 from .runner import BatchRefineRunner, build_refine_batch_tasks
 from .worker import RefineBatchTask, process_refine_batch_task
 
@@ -20,7 +19,6 @@ __all__ = [
     "BatchItemRecord",
     "BatchManifest",
     "BatchRefineRunner",
-    "NativeBatchRefineRunner",
     "RefineBatchTask",
     "MotionInputInspection",
     "assign_device",

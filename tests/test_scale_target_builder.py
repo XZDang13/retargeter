@@ -177,6 +177,28 @@ def test_contact_scores_activate_position_only_toe_heel_keypoints():
     assert target_set.get_target("left_foot").confidence == 1.0
 
 
+def test_target_builder_caches_multiple_scaled_motions_for_batch_use(monkeypatch):
+    motion_a = make_canonical_motion(num_frames=4)
+    motion_b = make_canonical_motion(num_frames=4)
+    motion_b.body_pos_w = motion_b.body_pos_w.copy()
+    motion_b.body_pos_w[:, :, 0] += 0.01
+    builder = IKTargetBuilder(G1_29_SCALER, G1_29_TARGETS)
+    calls: list[int] = []
+    real_scale_motion = builder.scaler.scale_motion
+
+    def recording_scale_motion(motion):
+        calls.append(id(motion))
+        return real_scale_motion(motion)
+
+    monkeypatch.setattr(builder.scaler, "scale_motion", recording_scale_motion)
+
+    for frame_idx in range(4):
+        builder.build(motion_a, frame_idx, "full_body_tracking")
+        builder.build(motion_b, frame_idx, "full_body_tracking")
+
+    assert calls == [id(motion_a), id(motion_b)]
+
+
 def test_config_robot_body_names_match_local_usd_assets():
     expected = {
         G1_29_SCALER: _usd_defined_names(Path("assets/robots/unitree_g1/g1_29_dof/Payload/Geometry.usda")),
