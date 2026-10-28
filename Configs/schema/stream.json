@@ -1,0 +1,32 @@
+{
+  "comment": "Teleop wire messages (DESIGN §10). Every message: 12-byte header (magic 'RTGS', version u16, type u16, payload length u32), then the fields in order, little-endian. Arrays and strings are prefixed by a u32 element count (strings: UTF-8 bytes). Poses are in the server's canonical frame: metres, Z-up, +X forward; quaternions w, x, y, z. Regenerate the codecs with tools/gen_stream_codec.py.",
+  "version": 1,
+  "messages": [
+    {"name": "StreamStart", "type": 1, "doc": "Client -> server: opens (or restarts) a stream with its human skeleton.",
+     "fields": [
+       ["stream_id", "u32"], ["fps", "f64", "nominal input rate (Hz)"], ["skeleton", "str", "e.g. soma77"],
+       ["joint_names", "str[]"], ["parents", "i32[]", "parent joint index, -1 for the root"],
+       ["rest_offsets", "f32[]", "J x 3, joint offset from its parent in the rest pose (m)"]]},
+    {"name": "HumanFrame", "type": 2, "doc": "Client -> server: one frame of a stream.",
+     "fields": [
+       ["stream_id", "u32"], ["seq", "u64"], ["t_source", "f64", "capture time of the frame (s, client clock)"],
+       ["joint_pos", "f32[]", "J x 3, local joint translations in the parent frame (m; the rest offsets unless the joint moves, e.g. root and hips)"],
+       ["joint_quat", "f32[]", "J x 4, local joint rotations relative to the parent"]]},
+    {"name": "StreamEnd", "type": 3, "doc": "Client -> server: closes a stream.",
+     "fields": [["stream_id", "u32"]]},
+    {"name": "StreamInfo", "type": 4, "doc": "Server -> client: reply to StreamStart (status 0) or an error about a stream (status 1).",
+     "fields": [
+       ["stream_id", "u32"], ["status", "u8", "0 ok, 1 error"], ["message", "str"], ["robot", "str"],
+       ["dof_names", "str[]"], ["contact_groups", "str[]", "names of RobotFrame.contact entries (human contact groups)"],
+       ["lag", "f64", "output lag behind the newest input (s)"]]},
+    {"name": "RobotFrame", "type": 5, "doc": "Server -> client: the robot pose solved for one HumanFrame.",
+     "fields": [
+       ["stream_id", "u32"], ["seq", "u64", "of the HumanFrame this solves"], ["t_source", "f64", "its t_source"],
+       ["t_receive", "f64", "server clock (s): frame received"], ["t_emit", "f64", "server clock (s): frame sent"],
+       ["root_pos", "f32[]", "3"], ["root_quat", "f32[]", "4, w x y z"], ["dof_pos", "f32[]", "N (rad)"],
+       ["dof_vel", "f32[]", "N (rad/s), backward difference of the emitted poses"],
+       ["contact", "u8[]", "per contact group, 1 = in contact"], ["ground_height", "f32", "tracked ground (m, human frame)"],
+       ["cost", "f32", "weighted tracking cost of the solve"],
+       ["flags", "u32", "bits: 1 velocity clamped, 2 cold start, 4 unsupported, 8 penetration, 16 environment support, 32 flight, 64 frames dropped"]]}
+  ]
+}

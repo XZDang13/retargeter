@@ -1,0 +1,25 @@
+// Robot properties that are not in the USD assets. Shared by g1_29dof and g1_23dof.
+{
+  // Joint velocity limits (rad/s): the USD assets carry none; these are the <limit velocity> values of Unitree's
+  // g1_29dof.urdf (unitree_ros, robots/g1_description; its efforts match the assets' actuator ranges). Keys are
+  // joint names; "default" applies to the rest.
+  // Ground friction coefficient for the contact-force estimate (rubber sole on a typical floor).
+  "friction": 0.7,
+  "velocity_limits": {
+    "default": 20.0,
+    "left_hip_pitch_joint": 32, "left_hip_roll_joint": 32, "left_hip_yaw_joint": 32, "left_knee_joint": 20,
+    "left_ankle_pitch_joint": 30, "left_ankle_roll_joint": 30,
+    "right_hip_pitch_joint": 32, "right_hip_roll_joint": 32, "right_hip_yaw_joint": 32, "right_knee_joint": 20,
+    "right_ankle_pitch_joint": 30, "right_ankle_roll_joint": 30,
+    "waist_yaw_joint": 32, "waist_roll_joint": 30, "waist_pitch_joint": 30,
+    "left_shoulder_pitch_joint": 37, "left_shoulder_roll_joint": 37, "left_shoulder_yaw_joint": 37,
+    "left_elbow_joint": 37, "left_wrist_roll_joint": 37, "left_wrist_pitch_joint": 22, "left_wrist_yaw_joint": 22,
+    "right_shoulder_pitch_joint": 37, "right_shoulder_roll_joint": 37, "right_shoulder_yaw_joint": 37,
+    "right_elbow_joint": 37, "right_wrist_roll_joint": 37, "right_wrist_pitch_joint": 22, "right_wrist_yaw_joint": 22
+  },
+  // Joint acceleration limits (rad/s²). Default per joint: derived from the model, effort / (inertia beyond the
+  // joint about its axis + armature) in the default pose (G1-29: hip pitch 95, waist pitch 80, shoulder pitch
+  // 178 ... ankles ~4000). Keys are joint names and override the derived value.
+  "acceleration_limits": {
+  }
+}

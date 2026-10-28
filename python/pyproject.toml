@@ -1,0 +1,13 @@
+[project]
+name = "retargeter-client"
+version = "0.1.0"
+description = "Client for the retargeter teleop server (retarget teleop): stream human frames, receive robot frames."
+requires-python = ">=3.9"
+dependencies = ["numpy", "pyzmq"]
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["retargeter_client"]

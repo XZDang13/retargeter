@@ -1,0 +1,10 @@
+build/
+.xmake/
+# BONES-SEED data is licensed and confidential: never commit or redistribute it.
+assets/body_models/soma/seed_soma_shapes/
+assets/body_models/soma/SEED_LICENSE.md
+# Derived from BONES-SEED shape parameters (same licence): regenerate with tools/bake_soma_surface.py.
+assets/body_models/soma/surface_*.npz
+# SMPL-X models are licensed (no redistribution) and over GitHub's 100 MB limit: download from smpl-x.is.tue.mpg.de.
+assets/body_models/smplx/*.npz
+__pycache__/

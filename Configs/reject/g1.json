@@ -1,0 +1,80 @@
+// Auto-reject thresholds (DESIGN §9). Each rule names a metric and a bound; severity "reject" fails the
+// clip, "warn" only records it. Human rules run before the robot solve (pre-filter); robot rules after.
+// Started from the literature (docs/retargeting-survey.md §5); calibrated on a 128-clip SOMA sample (DESIGN §14,
+// 2026-10-28). Values are rounded to two significant digits of the bound before comparing (0.25: 0.01 steps), so a
+// metric a hair over its bound does not fail; a rule's "precision" overrides the step.
+{
+  "human": [
+    { "metric": "env_contact_frames",     "max": 0,    "severity": "reject" },
+    { "metric": "env_support_frames",     "max": 0,    "severity": "reject" },
+    // Unexplained unsupported time (ZMP > 6 cm outside the support for runs of >= 0.3 s that no environment part
+    // explains), in seconds so it does not depend on the source rate. Brief excursions are possible for a real
+    // person and a robot alike (the point-mass ZMP is only an estimate); after the contact fixes the 128-clip sample
+    // has none outside a box clip, and the leftovers in box / stairs / chair clips are 0.03-0.53 s.
+    { "metric": "unsupported_seconds",    "max": 0,    "severity": "warn", "precision": 0.01 },
+    { "metric": "unsupported_seconds",    "max": 0.5,  "severity": "reject" },
+    { "metric": "penetration_frames",     "max": 0,    "severity": "reject" },
+    { "metric": "ground_tilt_deg",        "max": 2,    "severity": "warn" },
+    // Mean root jerk over 4 s windows (m/s^3): ordinary jogging and dancing reach 50-120 (600 random SOMA clips:
+    // p90 50, p99 94, max 122), so only far beyond that is it capture noise.
+    { "metric": "root_jerk_window_max",   "max": 100,  "severity": "warn" },
+    { "metric": "root_jerk_window_max",   "max": 200,  "severity": "reject" },
+    { "metric": "frames",                 "min": 10,   "severity": "reject" },
+    { "metric": "root_teleport_frames",   "max": 0,    "severity": "reject" },
+    { "metric": "non_finite_values",      "max": 0,    "severity": "reject" }
+  ],
+  "robot": [
+    { "metric": "tracking_pos_mean",           "max": 0.08,  "severity": "reject" },
+    { "metric": "tracking_pos_p95",            "max": 0.20,  "severity": "reject" },
+    { "metric": "tracking_rot_p95_deg",        "max": 45,    "severity": "warn" },
+    { "metric": "limit_violation_frames",      "max": 0,     "severity": "reject" },
+    { "metric": "velocity_violation_frames",   "max": 0,     "severity": "reject" },
+    { "metric": "joint_jump_frames",           "max": 0,     "severity": "reject" },
+    { "metric": "root_teleport_frames",        "max": 0,     "severity": "reject" },
+    // Robot minus human planted-part slide speed, p95 (m/s). Turning jogs reach 0.05-0.08 from 20-60 ms slides at
+    // touchdown / toe-off (~5 mm each); sustained skating is well beyond.
+    { "metric": "foot_skate_excess",           "max": 0.08,  "severity": "reject" },
+    { "metric": "foot_skate_p95",              "max": 0.15,  "severity": "warn" },
+    { "metric": "foot_float_p95",              "max": 0.03,  "severity": "reject" },
+    { "metric": "ground_penetration_max",      "max": 0.02,  "severity": "reject" },
+    // Measured on capsules fitted to the link meshes, which approximate the surface to ~1 cm.
+    { "metric": "self_collision_max",          "max": 0.015, "severity": "reject" },
+    { "metric": "start_tilt_deg",              "max": 20,    "severity": "warn" },
+    { "metric": "end_stability_margin",        "min": -0.03, "severity": "warn" },
+    // Dynamics (DESIGN §6): values held for a window (dynamics_*_window), so single noisy frames do not count.
+    // Feasibility = CoM support (residual, ZMP) and joint velocity / acceleration limits. Joint torques are
+    // recorded (torque_ratio_*) but not judged.
+    { "metric": "dyn_residual_max",            "max": 0.25,  "severity": "reject" },
+    // Warn on the top ~5 % (sample p90 0.15, p95 0.18); 0.10 warned on 30 % of clips.
+    { "metric": "dyn_residual_p95",            "max": 0.20,  "severity": "warn" },
+    // In flight (no ground contact) the residual is a CoM not falling ballistically, partly inherent to uniform
+    // scaling (~0.2 m·g); natural jumps 0.13-0.38 on the comparison and sample clips.
+    { "metric": "dyn_flight_residual_max",     "max": 0.40,  "severity": "reject" },
+    { "metric": "zmp_outside_max",             "max": 0.05,  "severity": "reject" },
+    { "metric": "joint_acc_ratio_max",         "max": 1.0,   "severity": "reject" }
+  ],
+  // Parameters of the metrics themselves.
+  "parameters": {
+    "root_jerk_window": 4.0,
+    "root_teleport_speed": 10.0,
+    "root_teleport_angular_speed": 20.0,
+    // Joint jump: one output step faster than this multiple of the joint's velocity limit.
+    "joint_jump": 1.5,
+    "skate_speed": 0.10,
+    "skate_contact_height": 0.02,
+    "skate_planted_speed": 0.10,
+    "skate_settle": 0.04,
+    "contact_points_height": 0.03,
+    // Dynamics: contacts are robot surface points touching the ground (z < touch), or near it (z < height) and
+    // slower than speed (m/s); velocities are Gaussian-smoothed (σ, s) before differentiating; the unexplained
+    // wrench is |f| / mg combined with |n| / (mg · moment_scale).
+    "dynamics_contact_touch": 0.005,
+    "dynamics_contact_height": 0.02,
+    "dynamics_contact_speed": 0.5,
+    "dynamics_smoothing": 0.02,
+    "dynamics_moment_scale": 0.1,
+    "dynamics_residual_window": 0.1,
+    "dynamics_zmp_window": 0.3,
+    "dynamics_torque_window": 0.05
+  }
+}

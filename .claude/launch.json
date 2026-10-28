@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "viewer",
+      "runtimeExecutable": "build/linux/x86_64/release/retarget",
+      "runtimeArgs": ["view", "--port", "8765"],
+      "port": 8765
+    }
+  ]
+}

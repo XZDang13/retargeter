@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Retargeter Live</title>
+<link rel="stylesheet" href="/web/viewer.css">
+<script type="importmap">
+{ "imports": { "three": "/web/vendor/three.module.js" } }
+</script>
+</head>
+<body>
+<header id="toolbar">
+  <div class="group">
+    <strong>Live teleop</strong>
+    <label class="check"><input type="checkbox" id="showHuman" checked> Human skeleton</label>
+    <label class="check"><input type="checkbox" id="follow" checked> Follow</label>
+  </div>
+  <span id="status">connecting…</span>
+</header>
+<main id="stage"></main>
+<footer id="timeline"><span id="streams">no streams</span></footer>
+<script type="module" src="/web/live.js"></script>
+</body>
+</html>

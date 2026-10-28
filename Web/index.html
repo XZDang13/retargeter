@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Retargeter Viewer</title>
+<link rel="stylesheet" href="/web/viewer.css">
+<script type="importmap">
+{ "imports": { "three": "/web/vendor/three.module.js" } }
+</script>
+</head>
+<body>
+<header id="toolbar">
+  <div class="group">
+    <label>Show
+      <select id="mode">
+        <option value="both">Robot + human</option>
+        <option value="robot">Robot only</option>
+        <option value="human">Human only</option>
+      </select>
+    </label>
+    <label>Layout
+      <select id="layout">
+        <option value="side">Side by side</option>
+        <option value="overlay">Overlay</option>
+      </select>
+    </label>
+  </div>
+  <div class="group">
+    <label>Robot
+      <select id="robot"></select>
+    </label>
+    <label>Robot motion
+      <select id="robotMotion">
+        <option value="offline">Retargeted (offline)</option>
+        <option value="retarget">Retargeted (realtime)</option>
+        <option value="wave">Demo: wave</option>
+        <option value="sweep">Demo: joint sweep</option>
+        <option value="zero">Demo: zero pose</option>
+      </select>
+    </label>
+  </div>
+  <div class="group">
+    <label>Human
+      <select id="dir"></select>
+      <select id="file"></select>
+    </label>
+    <label>Contacts
+      <select id="contactMode">
+        <option value="offline">Offline</option>
+        <option value="causal">Causal (realtime)</option>
+        <option value="off">Off</option>
+      </select>
+    </label>
+    <label class="check"><input type="checkbox" id="showSurface" checked> Body</label>
+    <label class="check"><input type="checkbox" id="showSkeleton" checked> Skeleton</label>
+  </div>
+</header>
+
+<main id="stage"></main>
+
+<section id="tracks" hidden>
+  <canvas id="trackCanvas"></canvas>
+</section>
+
+<footer id="timeline">
+  <button id="play" title="Play / pause (space)">▶</button>
+  <input id="scrub" type="range" min="0" max="1000" value="0" step="1">
+  <span id="time">0.00 s</span>
+  <label>Speed
+    <select id="speed">
+      <option>0.25</option><option>0.5</option><option selected>1</option><option>2</option>
+    </select>
+  </label>
+  <label class="check"><input type="checkbox" id="loop" checked> Loop</label>
+  <span id="status"></span>
+</footer>
+
+<script type="module" src="/web/viewer.js"></script>
+</body>
+</html>

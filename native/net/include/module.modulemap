@@ -1,0 +1,5 @@
+module CRTNet {
+    header "rtnet.h"
+    link "rtnet"
+    export *
+}

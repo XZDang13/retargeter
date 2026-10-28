@@ -1,0 +1,5 @@
+module CRTCompute {
+    header "rtcompute.h"
+    link "rtcompute"
+    export *
+}

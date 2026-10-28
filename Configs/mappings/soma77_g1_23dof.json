@@ -1,0 +1,109 @@
+// SOMA uniform skeleton (BONES-SEED BVH) -> Unitree G1 23-DoF.
+// pos / rot are residual weights (position in 1/m, orientation in 1/rad).
+{
+  "skeleton": "soma77",
+  "robot": "g1_23dof",
+  "root": { "human": "Hips", "robot": "pelvis" },
+  // per_chain: each target is placed at root + s * (human offset from the root), with s the ratio of
+  // robot to human chain length; the root itself is scaled uniformly by the pelvis-height ratio.
+  // Per-chain scaling from the root, except the limbs, which hang from anchors (shoulders, hips): each anchor goal
+  // sits where the robot's is (reference pose, carried by the chest / pelvis rotation) and the limb follows it
+  // scaled by its own length ratio. The legs' horizontal placement is scaled uniformly from the pelvis instead (only
+  // their height hangs from the hips), so a stance foot stays under the body as the person's was.
+  "scale": { "mode": "per_chain", "anchors": ["LeftArm", "RightArm",
+                                              { "joint": "LeftLeg", "horizontal": "uniform" },
+                                              { "joint": "RightLeg", "horizontal": "uniform" }] },
+  // Rotation offsets between human joint frames and robot link frames, from matching T-poses: the human
+  // reference (SOMA T-pose) against this robot pose (arms out sideways, elbows straight; the G1 elbow is
+  // bent 90° at q = 0). Joints not listed are 0; the root stands at the default pelvis pose.
+  "rotation_offsets": "tpose",
+  "reference_pose": {
+    "left_shoulder_roll_joint": 1.5708,
+    "right_shoulder_roll_joint": -1.5708,
+    "left_elbow_joint": 1.3875,
+    "right_elbow_joint": 1.3875
+  },
+  // Human body-part contacts (ContactGroups, feet excluded: they use the sole lock) -> robot link whose
+  // lowest capsule point is held on the ground while the part touches it (offline solver).
+  "contacts": {
+    "left_knee": "left_knee_link",   "right_knee": "right_knee_link",
+    "left_shin": "left_knee_link",   "right_shin": "right_knee_link",
+    "left_hand": "left_rubber_hand_link", "right_hand": "right_rubber_hand_link",
+    "left_elbow": "left_elbow_link", "right_elbow": "right_elbow_link",
+    "pelvis": "pelvis", "torso": "torso_link"
+  },
+  // Fixed-lag window of live streams (retarget teleop --lag): the offline costs, with a prior pulling each frame to
+  // its realtime solve (joints / root rotation 1/rad, root position 1/m) and a lighter dynamics term (offline 3:
+  // unstable with a 40 ms horizon; 2 already degraded tracking). DESIGN §7.
+  "fixed_lag": {
+    "reference": 1.0,
+    "reference_root": 3.0,
+    "dynamics": 1.0
+  },
+  // Offline whole-trajectory solver (residual weights; per frame at the source rate unless noted).
+  "offline": {
+    "sweeps": 150,
+    "anchor_interval": 5,
+    "warm_segment": 4.0,
+    "warm_overlap": 1.0,
+    "iterations": 1,
+    "velocity": 1.0,
+    "acceleration": 60.0,
+    "root_velocity": 2.0,
+    "lock": 60,
+    "lock_ramp": 0.05,
+    "lock_height": 0.04,
+    "ground": 200,
+    "ground_margin": 0.005,
+    "contact": 100,
+    "contact_ramp": 0.1,
+    "collision": 100,
+    "collision_margin": 0.0,
+    "collision_band": 0.03,
+    "root_acceleration": 60,
+    "hand_acceleration": 300,
+    "dynamics": 3.0,
+    "dynamics_model": "contact_forces",
+    "friction": 0.7,
+    "contact_iterations": 5,
+    "dynamics_stride": 0.025,
+    "max_joint_step": 0.05,
+    "max_root_step": 0.01
+  },
+  "targets": [
+    { "human": "Hips",          "robot": "pelvis",                "pos": 10, "rot": 5 },
+    { "human": "Chest",         "robot": "torso_link",            "pos": 0,  "rot": 3 },
+    { "human": "LeftLeg",       "robot": "left_hip_roll_link",    "pos": 2,  "rot": 0 },
+    { "human": "LeftShin",      "robot": "left_knee_link",        "pos": 3,  "rot": 0.5 },
+    { "human": "LeftFoot",      "robot": "left_ankle_roll_link",  "pos": 8,  "rot": 3 },
+    { "human": "LeftToeBase",   "robot": "left_toe_link",         "pos": 3,  "rot": 0 },
+    { "human": "RightLeg",      "robot": "right_hip_roll_link",   "pos": 2,  "rot": 0 },
+    { "human": "RightShin",     "robot": "right_knee_link",       "pos": 3,  "rot": 0.5 },
+    { "human": "RightFoot",     "robot": "right_ankle_roll_link", "pos": 8,  "rot": 3 },
+    { "human": "RightToeBase",  "robot": "right_toe_link",        "pos": 3,  "rot": 0 },
+    { "human": "LeftArm",       "robot": "left_shoulder_roll_link",  "pos": 1, "rot": 0 },
+    { "human": "LeftForeArm",   "robot": "left_elbow_link",          "pos": 3, "rot": 0.5 },
+    { "human": "LeftHand",      "robot": "left_wrist_roll",     "pos": 4, "rot": 0 },
+    { "human": "LeftHand",      "robot": "left_rubber_hand_link",      "pos": 0, "rot": 1 },
+    { "human": "RightArm",      "robot": "right_shoulder_roll_link", "pos": 1, "rot": 0 },
+    { "human": "RightForeArm",  "robot": "right_elbow_link",         "pos": 3, "rot": 0.5 },
+    { "human": "RightHand",     "robot": "right_wrist_roll",    "pos": 4, "rot": 0 },
+    { "human": "RightHand",     "robot": "right_rubber_hand_link",     "pos": 0, "rot": 1 }
+  ],
+  "solver": {
+    "iterations": 8,
+    "damping": 0.001,
+    "smoothness": 0.5,
+    "posture": 0.02,
+    "limit_margin": 0.98,
+    "limit_weight": 10,
+    // Arm branch switch (DESIGN §14): an arm stuck > 5 cm off at a joint-limit corner is solved again cold; a branch
+    // tracking 2x better for 0.2 s is eased into over 0.3 s instead of snapping (jump_right_003__A030).
+    "branch_blend": 0.3,
+    "branch_dwell": 0.2,
+    "dynamics": 0.0,
+    "dynamics_stride": 0.025,
+    "friction": 0.7,
+    "contact_iterations": 30
+  }
+}
