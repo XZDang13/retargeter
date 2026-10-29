@@ -13,6 +13,7 @@
     // has none outside a box clip, and the leftovers in box / stairs / chair clips are 0.03-0.53 s.
     { "metric": "unsupported_seconds",    "max": 0,    "severity": "warn", "precision": 0.01 },
     { "metric": "unsupported_seconds",    "max": 0.5,  "severity": "reject" },
+    // Frames with a part below the local floor (feet 4 cm, limbs / trunk 8 cm; ContactConfig) for >= 25 ms.
     { "metric": "penetration_frames",     "max": 0,    "severity": "reject" },
     { "metric": "ground_tilt_deg",        "max": 2,    "severity": "warn" },
     // Mean root jerk over 4 s windows (m/s^3): ordinary jogging and dancing reach 50-120 (600 random SOMA clips:
@@ -37,8 +38,8 @@
     { "metric": "foot_skate_p95",              "max": 0.15,  "severity": "warn" },
     { "metric": "foot_float_p95",              "max": 0.03,  "severity": "reject" },
     { "metric": "ground_penetration_max",      "max": 0.02,  "severity": "reject" },
-    // Measured on capsules fitted to the link meshes, which approximate the surface to ~1 cm.
-    { "metric": "self_collision_max",          "max": 0.015, "severity": "reject" },
+    // Measured on capsules fitted to the link meshes, which approximate the surface to ~1 cm (sample max 0.013).
+    { "metric": "self_collision_max",          "max": 0.02,  "severity": "reject" },
     { "metric": "start_tilt_deg",              "max": 20,    "severity": "warn" },
     { "metric": "end_stability_margin",        "min": -0.03, "severity": "warn" },
     // Dynamics (DESIGN §6): values held for a window (dynamics_*_window), so single noisy frames do not count.
@@ -50,7 +51,8 @@
     // In flight (no ground contact) the residual is a CoM not falling ballistically, partly inherent to uniform
     // scaling (~0.2 m·g); natural jumps 0.13-0.38 on the comparison and sample clips.
     { "metric": "dyn_flight_residual_max",     "max": 0.40,  "severity": "reject" },
-    { "metric": "zmp_outside_max",             "max": 0.05,  "severity": "reject" },
+    // ZMP outside the support, held 0.3 s (m). Sample p95 0.036, p99 0.053.
+    { "metric": "zmp_outside_max",             "max": 0.06,  "severity": "reject" },
     { "metric": "joint_acc_ratio_max",         "max": 1.0,   "severity": "reject" }
   ],
   // Parameters of the metrics themselves.

@@ -56,7 +56,7 @@ public struct ContactConfig: Sendable {
     // Source data. Mocap soft tissue sinks 1–2 cm and LBS has no flesh compression, so limbs and trunk get
     // more slack than feet. Hands are not checked: SEED finger capture bends through the floor under load
     // (fingertips up to ~10 cm below it) and fingers are not retargeted.
-    public var penetrationDepth = 0.03          // feet
+    public var penetrationDepth = 0.04          // feet (kneeling on tucked toes: heels 3-4 cm under the floor)
     public var penetrationDepthBody = 0.08      // limbs and trunk (kneeling: knees and thighs 6-7 cm under load)
     public var penetrationIgnored: Set<String> = ["left_hand", "right_hand"]
     public var penetrationMinDuration = 0.025

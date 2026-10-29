@@ -486,14 +486,21 @@ public struct RetargetSetup: Sendable {
             Transform(rotation: (world[humanJoint[t]].rotation * rotationOffsets[t]).normalized, translation: position[t])
         }
         for (t, p, path, twist) in reachPaths {
-            let parent = goals[p].rotation
-            // Twist about the shin comes from the hip, which turns the whole leg: right for a foot flat under an
-            // upright shin (standing, squatting, sitting), but a kneeling person's shin lies on the floor and turning
-            // the hip swings it sideways. Kept in proportion to how upright the person's shin is.
+            // Only for a shin lying on the floor (kneeling): there the person's foot is bent past the ankle's range and
+            // turned against the shin, and chasing it turned the robot's hip and swung its shin sideways. Any other
+            // foot keeps its own goal: clamped in proportion to the shin's slope, the planted feet of turning jogs
+            // turned with the shin (injured_torso_turn_jog skate 0.079 → 0.091), and a jogging shin also swings near
+            // horizontal behind the body. Full with the shin within ~17° of the floor and the knee below 20 cm, none
+            // with the shin steeper than ~45° or the knee above 40 cm.
             let shin = world[humanJoint[t]].translation - world[humanJoint[p]].translation
-            let keep = length(shin) > 1e-6 ? max(0, -normalize(shin).z) : 1
-            goals[t].rotation = (parent * reachable(parent.conjugate * goals[t].rotation, path: path, twist: twist, keep: keep,
-                                                    limits: limits)).normalized
+            let upright = length(shin) > 1e-6 ? -normalize(shin).z : 1
+            func step(_ x: Double) -> Double { let c = min(max(x, 0), 1); return c * c * (3 - 2 * c) }
+            let share = step((0.7 - upright) / 0.4) * step((0.4 - world[humanJoint[p]].translation.z) / 0.2)
+            guard share > 0 else { continue }
+            let parent = goals[p].rotation, own = goals[t].rotation
+            var reached = parent * reachable(parent.conjugate * own, path: path, twist: twist, keep: 0, limits: limits)
+            if reached.w * own.w + dot(reached.v, own.v) < 0 { reached = Quat(w: -reached.w, v: -reached.v) }
+            goals[t].rotation = Quat(w: (1 - share) * own.w + share * reached.w, v: (1 - share) * own.v + share * reached.v).normalized
         }
         return goals
     }

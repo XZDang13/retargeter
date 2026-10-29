@@ -414,7 +414,7 @@ Human-side pre-filter:
 |-----------------------------------------------------------|--------------------------|---------------|
 | `env_contact` / `env_support` (§5a)                       | any                      | ours          |
 | unexplained unsupported time (§5a)                        | > 0.5 s (warn > 0)       | ours          |
-| human penetration below ground                            | > 2 cm for > 3 frames    | ours          |
+| human penetration below the local floor (§5a)             | feet 4 cm, body 8 cm, ≥ 25 ms | ours     |
 | root jerk                                                 | > 50 m/s³                | PHUMA         |
 | CoM–CoP / support distance                                | > 0.1 m for > 100 frames, or at first/last frame | PBHC |
 | clip length                                               | < 10 frames              | UniTracker    |
@@ -429,11 +429,11 @@ Robot-side post-filter:
 | limits    | joint position / velocity beyond limits (frames)            | 0                   |
 | smoothness| p99 joint acceleration / jerk; joint-jump detector          | per joint           |
 | contact   | stance slide speed; floating / penetration in contact       | 10 cm/s; 1 cm       |
-| collision | self-collision penetration                                  | 0.5 cm              |
+| collision | self-collision penetration (capsules)                       | 2 cm                |
 | dynamics  | contact-wrench residual (unexplained base wrench), N / N·m  | relative to m·g     |
 | limits    | joint acceleration / effort-limited acceleration, held 50 ms | ≤ 1.0×             |
 | dynamics  | torque over effort limit, held 50 ms                        | recorded, not judged |
-| dynamics  | CoM / ZMP stability margin below 0, longest run             | 50 ms               |
+| dynamics  | ZMP outside the support, held 0.3 s                         | 6 cm                |
 | boundary  | first frame reachable from default pose; last frame statically stable | required  |
 
 - **Auto-reject is ON by default** (`--auto-reject` / `--no-auto-reject`).
@@ -928,15 +928,22 @@ retargeter/
   roll ±15°) and turns it against the shin lying on the floor; the solver chased the foot rotation (weight 3) with
   hip yaw and roll and splayed the left shin 22-45° sideways on average (up to 97°). Foot targets now carry
   `"reach": "<Left|Right>Shin"`: each frame the foot goal's rotation relative to the shin goal is projected onto what
-  the ankle joints reach (`RetargetSetup.reachable`, a few projected Gauss-Newton steps), keeping a share of the
-  twist about the shin equal to how upright the person's shin is (all of it standing, squatting or sitting with
-  the foot flat, none with the shin on the floor). Dropping the twist outright doubled realtime foot skate on walks
+  the ankle joints reach (`RetargetSetup.reachable`, a few projected Gauss-Newton steps), dropping the twist about
+  the shin (applied only while kneeling, see below). Dropping the twist outright doubled realtime foot skate on walks
   (the foot then yawed with the noisier shin twist); keeping it in proportion to the knee's straightness did the same
   on jump landings and stand-ups.
   - kneeling_start (8 clips, 220713): left shin heading error 22-45° → 10-12° mean; g1_29dof offline 0 → 5 accepted,
     g1_23dof 4 → 4 (two now just over tracking_pos_mean). Comparison clips: offline 7 accepted as before, tracking
     and foot skate equal or better; realtime walks unchanged, crawl / stand-up / push-up foot skate p95 up
     (0.13 → 0.25, 0.09 → 0.16, 0.022 → 0.029) while crawl foot float and penetration improve (0.076 → 0.022 m).
+  - Kneeling only (same day; user: injured_torso_turn_jog_360_R_003__A216_M newly rejected, foot skate excess
+    0.079 → 0.091). The projection is now blended in by how much the person kneels: fully with the shin within ~17°
+    of the floor and the knee below 20 cm, not at all with the shin steeper than ~45° or the knee above 40 cm
+    (smoothsteps; the projection itself drops the twist). Every other foot keeps its own goal, as before the reach.
+    A slope-only share still moved the jog's feet (0.084, 0.082): its shins swing near horizontal behind the body.
+    Turn jog accepted again (0.079); sample 121 → 122; kneeling clips 5/8 as before, kneeling test left shin
+    error 8.9° mean / 32° max (applied everywhere: 7.8° / 21°); comparison clips offline unchanged, crawl foot
+    skate 0.10 → 0.07; realtime stairs skate 0.11 → 0.20 (an environment reject anyway).
 - Validator friction 0.7 → 0.8 (2026-10-29; user: turn_jump_0135_003__A026 looks right but dyn_residual_max 0.26).
   At a one-foot 135° turn-jump push-off the CoM is 30-50 cm ahead of the foot, the body spins up and the foot
   unloads (1.2 → 0.2 m·g in 0.1 s): the twisting and sideways grip runs out of μ·N and ~0.25 m·g goes unexplained.
@@ -944,6 +951,13 @@ retargeter/
   220714 were friction-limited (0135_001 0.33 rejected, 0135_002 0.23) and pass at 0.8, 0° / 90° turn jumps do not
   depend on it, and the 128-clip sample is unchanged (123 accepted for μ 0.7-1.0). 0.8 is still conservative for a
   rubber sole (~0.8-1.0); the offline solver's dynamics term keeps 0.7 (mapping `friction`).
+- Thresholds relaxed a step (2026-10-29, user's call): `zmp_outside_max` 0.05 → 0.06 m (sample p95 0.036, p99
+  0.053), `self_collision_max` 0.015 → 0.02 m (capsules good to ~1 cm; sample max 0.013), human penetration depth
+  for feet 3 → 4 cm (kneeling on tucked toes squashes the heels 3.3-3.9 cm under the floor: kneeling_start
+  001 / 004__A023 flagged 100 / 193 frames). No clip of the 128 sample, kneeling, comparison or arm sets changes
+  status: each one these rules touched (dance slide ZMP 0.053, kneeling heels, crowd_cheer collision 0.021) has
+  another reject. The sample accepted 121 at that point (was 123 on 2026-10-28); 122 after the kneeling-only
+  foot reach above (still out: sit_on_heels_start_005__A024, tracking 0.088, 0.086 without the reach).
 
 ## 15. Open questions
 
