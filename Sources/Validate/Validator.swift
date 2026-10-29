@@ -193,7 +193,7 @@ public struct Validator: Sendable {
         let set = robot.dofNames.map { overrides?[$0]?.double }
         accelerationOverrides = set
         accelerationLimits = (0..<robot.dofCount).map { set[$0] ?? derived[$0] }
-        robotFriction = robotConfig?["friction"]?.double ?? 0.7
+        robotFriction = robotConfig?["friction"]?.double ?? 0.8
     }
 
     // MARK: Human stage

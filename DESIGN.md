@@ -241,7 +241,7 @@ Dynamics:
 
 As implemented (milestone 5): the validator runs the full model — double-precision floating-base RNEA
 (`Sources/Dynamics`) and per-frame contact forces by non-negative least squares on friction-pyramid edges
-(μ = 0.7) at the robot's own ground-touching surface points, torque rows only breaking ties between force
+(μ = 0.8, `Configs/robots/g1.json`; 0.7 until 2026-10-29) at the robot's own ground-touching surface points, torque rows only breaking ties between force
 distributions. The offline solver uses point-mass links: centroidal wrench rows (contact forces re-solved in
 the kernel every step, warm-started from the previous sweep). The solver's torque rows were removed on
 2026-10-26: torques are not judged and the term changed no judged metric (see §13, milestone 5).
@@ -732,8 +732,8 @@ retargeter/
      before the speed-up: the host recomputed stance anchors and contact patches for every frame on every sweep
      (34 s) — now parallel over frames and refreshed every 5 sweeps (`anchor_interval`) — and the in-kernel
      contact-force solve now warm-starts from the previous sweep (5 coordinate-descent passes instead of 30).
-   - Limitations: link rotational inertia is ignored in the solver (the validator has it). Friction μ = 0.7 is
-     assumed.
+   - Limitations: link rotational inertia is ignored in the solver (the validator has it). The solver assumes
+     friction μ = 0.7 (mapping `friction`), the validator 0.8.
 6. **Teleop** — fixed-lag realtime, UDP/WebSocket streams, Python client, live viewer.
    - *Phase A done 2026-10-27 (lag 0):* `retarget teleop` (ZeroMQ ROUTER server, §10), `LiveRetargeter` (§7),
      `python/retargeter_client` (client, BVH reader, `python -m retargeter_client clip.bvh …` real-time replay with
@@ -879,6 +879,17 @@ retargeter/
     its shoulder 3 rad back and forth: the arm pumps overhead and each branch wins in turn.
   - Comparison clips: bit-identical offline, realtime and lag (no switch fires). Teleop p95 unchanged (1.7 ms lag 0,
     68 ms lag 40 ms). The CPU kernel (`retarget_ik.slang`) has no switch.
+  - Clear wins start at once (2026-10-29; user: reach_jump_R_002__A212's right arm unnatural from 2.3 s). The arm
+    goes overhead by flexion (shoulder pitch −3) and the person drops it out to the side; the warm branch sat at the
+    roll / yaw stops (−2.22, 2.58) with the elbow bent while a cold solve tracked the arm at its side (cost 0.12 vs
+    0.77 from 2.15 s), but the dwell plus blend put the arm down only at 2.7 s. A new branch that quarters the arm
+    cost now starts easing in when found; others, and every reversal, still wait out the dwell. While the person is
+    airborne (causal contacts) every blend runs at half speed: at full speed reach_jump_R_002__A213's left arm swung
+    through 3 rad mid-jump and the flight residual (angular momentum nothing can supply in the air) rose 0.34 → 0.47.
+    Pausing blends in flight instead held A212's left arm up past landing.
+    - A212: right arm down by 2.5 s (was 2.7 s), offline mean cost 0.49 → 0.46 (still joint_acc_ratio 1.1, as
+      before). A213: flight residual 0.34 as before, accepted. 10 arm clips (8 reach jumps, crowd_cheer,
+      jump_right): equal or better tracking, same accepts; comparison clips unchanged.
 
 - Contacts and thresholds (2026-10-28; user: contacts wrong on step-downs / sitting, rejects a hair over the
   bound, rethink the thresholds). Calibrated on the 128-clip sample: 111 → 123 accepted; comparison clips 6 → 7.
@@ -912,6 +923,27 @@ retargeter/
     0.03-0.53 s, none in the sample outside a box clip. `unsupported_frames` is still recorded.
   - Still rejected in the sample, judged real: box step-down, burpee (robot: residual, ZMP), jump_and_land_professional (landing over effort-limited acceleration), dance slide (ZMP and
     residual), sit cross-legged (tracking, self-collision).
+- Foot goals within ankle reach (2026-10-29; user: legs point the wrong way in kneeling_start_004__A021,
+  kneeling_start_001__A023). Kneeling on tucked toes bends the person's foot past the G1 ankle (pitch -50°..30°,
+  roll ±15°) and turns it against the shin lying on the floor; the solver chased the foot rotation (weight 3) with
+  hip yaw and roll and splayed the left shin 22-45° sideways on average (up to 97°). Foot targets now carry
+  `"reach": "<Left|Right>Shin"`: each frame the foot goal's rotation relative to the shin goal is projected onto what
+  the ankle joints reach (`RetargetSetup.reachable`, a few projected Gauss-Newton steps), keeping a share of the
+  twist about the shin equal to how upright the person's shin is (all of it standing, squatting or sitting with
+  the foot flat, none with the shin on the floor). Dropping the twist outright doubled realtime foot skate on walks
+  (the foot then yawed with the noisier shin twist); keeping it in proportion to the knee's straightness did the same
+  on jump landings and stand-ups.
+  - kneeling_start (8 clips, 220713): left shin heading error 22-45° → 10-12° mean; g1_29dof offline 0 → 5 accepted,
+    g1_23dof 4 → 4 (two now just over tracking_pos_mean). Comparison clips: offline 7 accepted as before, tracking
+    and foot skate equal or better; realtime walks unchanged, crawl / stand-up / push-up foot skate p95 up
+    (0.13 → 0.25, 0.09 → 0.16, 0.022 → 0.029) while crawl foot float and penetration improve (0.076 → 0.022 m).
+- Validator friction 0.7 → 0.8 (2026-10-29; user: turn_jump_0135_003__A026 looks right but dyn_residual_max 0.26).
+  At a one-foot 135° turn-jump push-off the CoM is 30-50 cm ahead of the foot, the body spins up and the foot
+  unloads (1.2 → 0.2 m·g in 0.1 s): the twisting and sideways grip runs out of μ·N and ~0.25 m·g goes unexplained.
+  Velocity smoothing adds only ~0.02. Residual by μ (0.7 / 0.8 / 1.0): 0.26 / 0.15 / 0.10; all three 135° clips of
+  220714 were friction-limited (0135_001 0.33 rejected, 0135_002 0.23) and pass at 0.8, 0° / 90° turn jumps do not
+  depend on it, and the 128-clip sample is unchanged (123 accepted for μ 0.7-1.0). 0.8 is still conservative for a
+  rubber sole (~0.8-1.0); the offline solver's dynamics term keeps 0.7 (mapping `friction`).
 
 ## 15. Open questions
 
@@ -925,7 +957,7 @@ retargeter/
   bit-identical, but on jump_right the snap only moves from 3.6 s to 1.9 s (shoulder pitch ~57 rad/s realtime,
   roll still pinned at −2.22); lag joint-acceleration ratio 1.2 → 2.5. Not kept. Still open: crowd_cheer_001__A029
   (both arm branches sit at shoulder limits while the arm pumps overhead, plus the source hand twist).
-- Dynamics thresholds are calibrated on 10 clips only; friction (0.7) and the G1 effort limits (taken from the
+- Dynamics thresholds are calibrated on 10 clips only; friction (validator 0.8, solver 0.7) and the G1 effort limits (taken from the
   USD assets' MuJoCo actuator ranges) should be checked against Unitree's specification, as should the derived
   acceleration limits (they ignore gravity load and use the straight-leg pose, the largest hip inertia).
 

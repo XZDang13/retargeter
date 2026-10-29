@@ -496,6 +496,39 @@ test("[g1_29dof] arm branch switch: eases out of a joint-limit corner, live = ba
            "streamed solve equals the batch solve bit for bit")
 }
 
+test("[g1_29dof] kneeling: shins point back like the person's (foot goals within ankle reach)") {
+    // kneeling_start_004__A023: tucked toes bend the person's foot past the robot's ankle range and turn it against
+    // the shin on the floor; chasing that with the hip splayed the robot's left shin up to ~90° sideways.
+    let (_, robot) = robots[0]
+    let motion = try BVH.load(file: bvhRoot + "220713/kneeling_start_004__A023.bvh")
+    var unclamped = try mapping("g1_29dof")
+    for t in unclamped.targets.indices { unclamped.targets[t].reach = nil }
+    @MainActor func splay(_ m: RetargetMapping) throws -> (mean: Double, max: Double) {
+        let r = try HumanRetargeter(device: cuda, robot: robot, mapping: m, surface: surface, skeleton: motion.skeleton)
+        let traj = try r.retarget([motion])[0].trajectory
+        let s = motion.skeleton
+        let human = ["LeftLeg", "RightLeg", "LeftShin", "LeftFoot"].map { s.jointIndex(named: $0)! }
+        let link = ["left_hip_yaw_link", "right_hip_yaw_link", "left_knee_link", "left_ankle_roll_link"].map { robot.linkIndex(named: $0)! }
+        // Shin heading (knee to ankle, horizontal) in the hips' frame; frames where the person's shin lies flat.
+        func heading(_ p: [Vec3]) -> (angle: Double, flat: Double) {
+            let lateral = normalize(Vec3(p[0].x - p[1].x, p[0].y - p[1].y, 0)), forward = Vec3(lateral.y, -lateral.x, 0)
+            let shin = p[3] - p[2]
+            return (atan2(dot(shin, lateral), -dot(shin, forward)), length(Vec3(shin.x, shin.y, 0)) / length(shin))
+        }
+        var errors: [Double] = []
+        for f in 0..<motion.frameCount {
+            let hw = motion.globalTransforms(frame: f), rw = robot.forwardKinematics(root: traj.root[f], q: traj.q[f])
+            let h = heading(human.map { hw[$0].translation }), b = heading(link.map { rw[$0].translation })
+            guard h.flat > 0.6 else { continue }
+            errors.append(abs(remainder(b.angle - h.angle, 2 * .pi)) * 180 / .pi)
+        }
+        return (errors.reduce(0, +) / Double(errors.count), errors.max()!)
+    }
+    let before = try splay(unclamped), after = try splay(try mapping("g1_29dof"))
+    print("  left shin heading error mean / max \(before.mean) / \(before.max) -> \(after.mean) / \(after.max) deg")
+    expect(before.mean > 25 && after.mean < 15 && after.max < 35, "shin follows the person's")
+}
+
 test("[g1_29dof] live fixed lag reproduces the batch lagged solve") {
     // The teleop path (LiveRetargeter with a fixed-lag window solved at 50 Hz of stream time) against
     // LaggedRetargeter on the same clips, with the live frames handed over in batches of varying size (as the server

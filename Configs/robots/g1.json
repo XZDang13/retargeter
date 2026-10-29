@@ -3,8 +3,9 @@
   // Joint velocity limits (rad/s): the USD assets carry none; these are the <limit velocity> values of Unitree's
   // g1_29dof.urdf (unitree_ros, robots/g1_description; its efforts match the assets' actuator ranges). Keys are
   // joint names; "default" applies to the rest.
-  // Ground friction coefficient for the contact-force estimate (rubber sole on a typical floor).
-  "friction": 0.7,
+  // Ground friction coefficient for the validator's contact-force estimate (rubber sole on a typical floor,
+  // ~0.8-1.0). 0.7 rejected 135° turn jumps for the twisting grip at push-off (DESIGN §14).
+  "friction": 0.8,
   "velocity_limits": {
     "default": 20.0,
     "left_hip_pitch_joint": 32, "left_hip_roll_joint": 32, "left_hip_yaw_joint": 32, "left_knee_joint": 20,

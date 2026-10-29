@@ -605,10 +605,23 @@ void restoreMain(uint lane, int arm)
 /// a few tenths of a second, and switching at every turn swung the shoulder 3 rad back and forth. Reaching the
 /// incoming branch swaps the two (the old one stays as the alternative); the alternative is dropped once the
 /// output has rested on the current branch for `branchKeep` frames, or when the two have merged.
+/// Whether the person touches anything at `frame` (causal contacts): sole corners or other body parts.
+bool grounded(uint frame)
+{
+    for (uint k = 0; k < 8; k++)
+        if (soleContact[frame * 8 + k] > 0.0)
+            return true;
+    for (uint l = 0; l < numLinks; l++)
+        if (linkContactRT[frame * numLinks + l] > 0.0)
+            return true;
+    return false;
+}
+
 bool branchSwitch(uint s, uint frame, int history, uint lane, uint nv, uint rowDynamics)
 {
     uint n = numDofs;
     bool any = false;
+    bool airborne = !grounded(frame);
     float weight[2] = { -1.0, -1.0 };
     bool swap[2] = { false, false };
     // The current branch's arm tracking, from the frame's solve (gR still holds its rows).
@@ -653,16 +666,20 @@ bool branchSwitch(uint s, uint frame, int history, uint lane, uint nv, uint rowD
         float costAlt = gArmCost;
         if (gBranch[b0] == 0)
         {
-            // A new branch is taken on only if it more than halves the arm's tracking cost.
+            // A new branch is taken on only if it more than halves the arm's tracking cost. One that quarters it is
+            // eased into at once (reach_jump_R_002__A212: the arm stuck at the shoulder's roll / yaw stops while the
+            // person's dropped to the side, 0.5 s behind with the dwell), or from landing when found in the air.
+            // Otherwise it waits out the dwell like a reversal.
             if (!(costAlt < 0.5 * costMain))
                 continue;
+            bool clear = costAlt < 0.25 * costMain;
             if (lane == 0)
             {
                 gBranch[b0] = 1;
                 gBranch[b0 + 1] = 0;
                 gBranch[b0 + 2] = 0;
-                gBranch[b0 + 3] = 0;
-                gBranch[b0 + 4] = 0;
+                gBranch[b0 + 3] = clear ? 1 : 0;
+                gBranch[b0 + 4] = clear ? int(branchDwell) : 0;
             }
         }
         for (uint j = lane; j < n; j += GROUP)
@@ -689,7 +706,9 @@ bool branchSwitch(uint s, uint frame, int history, uint lane, uint nv, uint rowD
             dir = 1;
         else if (evidence <= -int(branchDwell))
             dir = -1;
-        p = clamp(p + dir, 0, int(branchBlend));
+        // At half speed while the person is airborne: the blend swings the arm through up to 3 rad, and in flight
+        // nothing supplies the angular momentum that takes (reach_jump_R_002__A213: residual 1.0 m·g at full speed).
+        p = clamp(p + (airborne && history % 2 != 0 ? 0 : dir), 0, int(branchBlend));
         bool swapped = uint(p) >= branchBlend;
         idle = p == 0 && dir <= 0 ? idle + 1 : 0;
         float x = float(p) / float(branchBlend);

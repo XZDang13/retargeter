@@ -70,16 +70,17 @@
     "max_joint_step": 0.05,
     "max_root_step": 0.01
   },
+  // "reach": the foot goal's rotation relative to the shin goal is clamped to the ankle's range (DESIGN §14).
   "targets": [
     { "human": "Hips",          "robot": "pelvis",                "pos": 10, "rot": 5 },
     { "human": "Chest",         "robot": "torso_link",            "pos": 0,  "rot": 3 },
     { "human": "LeftLeg",       "robot": "left_hip_roll_link",    "pos": 2,  "rot": 0 },
     { "human": "LeftShin",      "robot": "left_knee_link",        "pos": 3,  "rot": 0.5 },
-    { "human": "LeftFoot",      "robot": "left_ankle_roll_link",  "pos": 8,  "rot": 3 },
+    { "human": "LeftFoot",      "robot": "left_ankle_roll_link",  "pos": 8,  "rot": 3, "reach": "LeftShin" },
     { "human": "LeftToeBase",   "robot": "left_toe_link",         "pos": 3,  "rot": 0 },
     { "human": "RightLeg",      "robot": "right_hip_roll_link",   "pos": 2,  "rot": 0 },
     { "human": "RightShin",     "robot": "right_knee_link",       "pos": 3,  "rot": 0.5 },
-    { "human": "RightFoot",     "robot": "right_ankle_roll_link", "pos": 8,  "rot": 3 },
+    { "human": "RightFoot",     "robot": "right_ankle_roll_link", "pos": 8,  "rot": 3, "reach": "RightShin" },
     { "human": "RightToeBase",  "robot": "right_toe_link",        "pos": 3,  "rot": 0 },
     { "human": "LeftArm",       "robot": "left_shoulder_roll_link",  "pos": 1, "rot": 0 },
     { "human": "LeftForeArm",   "robot": "left_elbow_link",          "pos": 3, "rot": 0.5 },

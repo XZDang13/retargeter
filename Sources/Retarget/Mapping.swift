@@ -3,6 +3,12 @@
 
 import Core
 
+#if canImport(Glibc)
+import Glibc
+#elseif canImport(Darwin)
+import Darwin
+#endif
+
 public struct RetargetMapping: Sendable {
     public struct Target: Sendable {
         public var human: String
@@ -13,6 +19,9 @@ public struct RetargetMapping: Sendable {
         /// the forearm is the least reliable part of its orientation.
         public var twist = 1.0
         public var twistAxis = Vec3(1, 0, 0)
+        /// Human joint of another target (e.g. the shin for a foot): this goal's rotation relative to that goal is
+        /// clamped to what the robot joints between the two links can reach within their limits.
+        public var reach: String? = nil
     }
 
     public struct Solver: Sendable {
@@ -229,7 +238,8 @@ public struct RetargetMapping: Sendable {
                 Target(human: try need(t["human"]?.string, "target.human"), robot: try need(t["robot"]?.string, "target.robot"),
                        positionWeight: t["pos"]?.double ?? 0, rotationWeight: t["rot"]?.double ?? 0,
                        twist: t["twist"]?.double ?? 1,
-                       twistAxis: t["twist_axis"]?.array.map { a in Vec3(a[0].double ?? 1, a[1].double ?? 0, a[2].double ?? 0) } ?? Vec3(1, 0, 0))
+                       twistAxis: t["twist_axis"]?.array.map { a in Vec3(a[0].double ?? 1, a[1].double ?? 0, a[2].double ?? 0) } ?? Vec3(1, 0, 0),
+                       reach: t["reach"]?.string)
             },
             solver: solver, offline: offline, fixedLag: fixedLag, solverLimits: solverLimits,
             contacts: json["contacts"]?.object?.compactMapValues { $0.string } ?? [:])
@@ -259,11 +269,16 @@ public struct RetargetSetup: Sendable {
     var uniformHorizontal: [Int: Int]
     /// Per target: goal rotation = human joint world rotation · offset.
     public var rotationOffsets: [Quat]
+    /// Targets with `reach`: the other target, the links from it down to this target's link and the limb axis
+    /// between the two (the other link's frame).
+    var reachPaths: [(target: Int, parent: Int, path: [Int], twist: Vec3)] = []
+    let limits: [(lower: Double, upper: Double)]
 
     public init(mapping: RetargetMapping, robot: RobotModel, skeleton: HumanSkeleton, humanReference: [Transform]) throws {
         self.mapping = mapping
         self.robot = robot
         self.skeleton = skeleton
+        limits = mapping.solverLimits(robot)
         func human(_ name: String) throws -> Int {
             guard let j = skeleton.jointIndex(named: name) else { throw JSONError(message: "mapping: no human joint \(name)") }
             return j
@@ -372,6 +387,74 @@ public struct RetargetSetup: Sendable {
         self.anchorOf = anchorOf
         self.anchorCorrection = anchorCorrection
         self.uniformHorizontal = uniformHorizontal
+
+        for t in mapping.targets.indices {
+            guard let name = mapping.targets[t].reach else { continue }
+            guard let p = mapping.targets.indices.first(where: { mapping.targets[$0].human == name }) else {
+                throw JSONError(message: "mapping: reach target \(name) has no target")
+            }
+            var path: [Int] = []
+            var i: Int? = robotLink[t]
+            while let k = i, k != robotLink[p] { path.append(k); i = robot.links[k].parent }
+            guard i != nil else { throw JSONError(message: "mapping: \(mapping.targets[t].robot) is not below \(mapping.targets[p].robot)") }
+            let axis = robotRest[robotLink[p]].rotation.conjugate.rotate(robotRest[robotLink[t]].translation - robotRest[robotLink[p]].translation)
+            reachPaths.append((t, p, path.reversed(), normalize(axis)))
+        }
+    }
+
+    /// Rotation closest to `goal` (relative to the parent link) that the joints on `path` reach within limits, plus a
+    /// share `keep` of the twist about the limb axis `twist` (a free extra joint in the fit, which the hip produces):
+    /// projected Gauss-Newton from the joints at 0. The rest is dropped. On a kneeling person's foot it is the
+    /// dorsiflexion of the tucked toes and the foot's turn against the shin lying on the floor, which the solver
+    /// otherwise found by twisting the whole leg (hip yaw and roll) and splayed the shin up to 90° sideways.
+    func reachable(_ goal: Quat, path: [Int], twist: Vec3, keep: Double, limits: [(lower: Double, upper: Double)]) -> Quat {
+        let joints = path.indices.filter { robot.links[path[$0]].dofIndex != nil }
+        var q = [Double](repeating: 0, count: path.count)
+        var spin = 0.0
+        func chain() -> (rotation: Quat, axes: [Vec3]) {
+            var r = Quat(axis: twist, angle: spin)
+            var axes: [Vec3] = [twist]
+            for (k, l) in path.enumerated() {
+                let link = robot.links[l]
+                r = r * link.jointOrigin.rotation
+                if case .revolute(let axis) = link.joint, link.dofIndex != nil {
+                    axes.append(r.rotate(axis))
+                    r = r * Quat(axis: axis, angle: q[k])
+                }
+                r = r * link.jointToChild.rotation
+            }
+            return (r, axes)
+        }
+        for _ in 0..<12 {
+            let (r, axes) = chain()
+            var e = goal * r.conjugate
+            if e.w < 0 { e = Quat(w: -e.w, v: -e.v) }
+            let s = length(e.v)
+            if s < 1e-9 { break }
+            let error = 2 * atan2(s, e.w) / s * e.v
+            // Normal equations (n ≤ 3 joints), damped.
+            let n = axes.count
+            var a = [[Double]](repeating: [Double](repeating: 0, count: n + 1), count: n)
+            for i in 0..<n {
+                for j in 0..<n { a[i][j] = dot(axes[i], axes[j]) + (i == j ? 1e-6 : 0) }
+                a[i][n] = dot(axes[i], error)
+            }
+            for c in 0..<n {
+                let pivot = (c..<n).max { abs(a[$0][c]) < abs(a[$1][c]) }!
+                a.swapAt(c, pivot)
+                for r in 0..<n where r != c {
+                    let f = a[r][c] / a[c][c]
+                    for k in c...n { a[r][k] -= f * a[c][k] }
+                }
+            }
+            spin += a[0][n] / a[0][0]
+            for (i, k) in joints.enumerated() {
+                let range = limits[robot.links[path[k]].dofIndex!]
+                q[k] = min(max(q[k] + a[i + 1][n] / a[i + 1][i + 1], range.lower), range.upper)
+            }
+        }
+        spin *= keep
+        return chain().rotation
     }
 
     /// Goal poses for one frame of human world joint transforms (already shifted so the ground is z = 0).
@@ -399,8 +482,19 @@ public struct RetargetSetup: Sendable {
                 }
             }
         }
-        return mapping.targets.indices.map { t in
+        var goals = mapping.targets.indices.map { t in
             Transform(rotation: (world[humanJoint[t]].rotation * rotationOffsets[t]).normalized, translation: position[t])
         }
+        for (t, p, path, twist) in reachPaths {
+            let parent = goals[p].rotation
+            // Twist about the shin comes from the hip, which turns the whole leg: right for a foot flat under an
+            // upright shin (standing, squatting, sitting), but a kneeling person's shin lies on the floor and turning
+            // the hip swings it sideways. Kept in proportion to how upright the person's shin is.
+            let shin = world[humanJoint[t]].translation - world[humanJoint[p]].translation
+            let keep = length(shin) > 1e-6 ? max(0, -normalize(shin).z) : 1
+            goals[t].rotation = (parent * reachable(parent.conjugate * goals[t].rotation, path: path, twist: twist, keep: keep,
+                                                    limits: limits)).normalized
+        }
+        return goals
     }
 }
