@@ -8,3 +8,4 @@ assets/body_models/soma/surface_*.npz
 # SMPL-X models are licensed (no redistribution) and over GitHub's 100 MB limit: download from smpl-x.is.tue.mpg.de.
 assets/body_models/smplx/*.npz
 __pycache__/
+*.egg-info/

@@ -210,13 +210,14 @@ test("rules") {
 
 test("soma-retargeter CSV convention") {
     // Root rotation written as scipy as_euler('xyz') (extrinsic): R = Rz(c) Ry(b) Rx(a).
-    let file = repositoryRoot + "/build/fixtures/nv_test.csv"
+    let file = "/tmp/retargeter_nv_test_\(getpid()).csv"
     let header = "Frame,root_translateX,root_translateY,root_translateZ,root_rotateX,root_rotateY,root_rotateZ," + robot.dofNames.joined(separator: ",")
     let row = "0,10,20,79,30,-20,45," + (0..<n).map { _ in "10" }.joined(separator: ",")
     let handle = fopen(file, "w")!
     fputs(header + "\r\n" + row + "\r\n", handle)
     fclose(handle)
     let m = try RobotMotionImport.nvidiaCSV(file: file)
+    unlink(file)
     let expected = Quat(axis: Vec3(0, 0, 1), angle: .pi / 4) * Quat(axis: Vec3(0, 1, 0), angle: -.pi / 9) * Quat(axis: Vec3(1, 0, 0), angle: .pi / 6)
     expect(m.root.count == 1 && m.jointNames == robot.dofNames, "parsed one frame, joint names")
     expect(Quat.angle(m.root[0].rotation, expected) < 1e-9, "rotation convention")

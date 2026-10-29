@@ -17,7 +17,6 @@ let g1 = repositoryRoot + "/assets/robots/unitree_g1/"
 let robots = [("g1_29dof", try RobotUSDLoader.load(directory: g1 + "g1_29_dof", name: "g1_29dof")),
               ("g1_23dof", try RobotUSDLoader.load(directory: g1 + "g1_23_dof", name: "g1_23dof"))]
 let surface = try BodySurface.load(file: repositoryRoot + "/assets/body_models/soma/surface_lo.npz")
-let bvhRoot = "/home/troja/Downloads/soma_uniform/bvh/"
 let clips = ["210531/walk_forward_amateur_001__A001.bvh", "230322/sweep_floor_side_walk_R_004__A298.bvh",
              "220713/kneeling_loop_001__A021.bvh", "221010/jump_ff_180_R_001__A045.bvh"]
 let motions = try clips.map { try BVH.load(file: bvhRoot + $0) }

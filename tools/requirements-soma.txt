@@ -1,0 +1,8 @@
+# Extra tooling for baking the SOMA body surface (tools/bake_soma_surface.py, needs the BONES-SEED shapes),
+# on top of requirements.txt. SOMA-X itself is cloned and installed by setup.sh. Torch is the CPU build.
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.10.0+cpu
+scipy==1.18.1
+warp-lang==1.11.1
+trimesh==5.1.1
+rtree==1.4.1

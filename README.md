@@ -2,44 +2,34 @@
 
 Human motion (SOMA / SMPL-X) → Unitree G1 retargeting in Swift + Slang. Design: [DESIGN.md](DESIGN.md).
 
-## Build and test
+## Setup
+
+Needs Linux x86-64 with an NVIDIA GPU (CUDA driver), a Swift 6 toolchain ([swiftly](https://www.swift.org/install)),
+[xmake](https://xmake.io) 3, cmake, git and Python 3.10+. Then:
 
 ```bash
-xmake          # fetches Slang + slang-rhi on first run, builds everything
+./setup.sh
+```
+
+It checks the prerequisites, builds (the first run downloads and builds Slang and slang-rhi), makes the tooling
+venv `build/tools/venv` (`tools/requirements.txt`: robot mesh export, the teleop client) and exports the robot
+meshes for the viewer. Re-running skips finished steps; `--help` lists the options.
+
+**SOMA body surface.** Retargeting, the viewer's body and most tests need `assets/body_models/soma/surface_lo.npz`,
+baked from the BONES-SEED shapes. Put the BONES-SEED `soma_shapes/` folder at
+`assets/body_models/soma/seed_soma_shapes` and the SOMA uniform BVH clips at `~/Downloads/soma_uniform/bvh` (or set
+`SOMA_BVH_ROOT`), then run `./setup.sh` again: it adds torch (CPU) and SOMA-X to the venv
+(`tools/requirements-soma.txt`, ~3 GB) and bakes the surface. BONES-SEED data and anything derived from it
+(`seed_soma_shapes/`, `surface_*.npz`) is licensed and must not be committed or redistributed; `.gitignore`
+excludes it.
+
+## Test
+
+```bash
 xmake test     # all test suites (parity, dynamics identities, retargeting, validation)
 ```
 
-## Generated assets
-
-Some assets are produced by Python tools (tooling only, never on the runtime path). They need a venv
-with SOMA-X, usd-core and torch (CPU) under `build/tools/`:
-
-```bash
-python3 -m venv build/tools/venv
-build/tools/venv/bin/pip install torch==2.10.0 --index-url https://download.pytorch.org/whl/cpu
-build/tools/venv/bin/pip install numpy scipy usd-core==26.3 warp-lang==1.11.1 trimesh rtree
-git clone https://github.com/NVlabs/SOMA-X.git build/tools/SOMA-X
-build/tools/venv/bin/pip install --no-deps -e build/tools/SOMA-X
-```
-
-- Robot meshes for the viewer:
-
-  ```bash
-  build/tools/venv/bin/python -I tools/export_robot_meshes.py assets/robots/unitree_g1/g1_29_dof build/viewer/robots/g1_29dof.glb
-  build/tools/venv/bin/python -I tools/export_robot_meshes.py assets/robots/unitree_g1/g1_23_dof build/viewer/robots/g1_23dof.glb
-  ```
-
-- SOMA body surface (needs the BONES-SEED `soma_shapes/` folder in `assets/body_models/soma/seed_soma_shapes`):
-
-  ```bash
-  build/tools/venv/bin/python -I tools/bake_soma_surface.py --soma-x build/tools/SOMA-X/assets \
-      --shape assets/body_models/soma/seed_soma_shapes/soma_base_fit_mhr_params.npz \
-      --bvh ~/Downloads/soma_uniform/bvh/230322/sweep_floor_side_walk_R_004__A298.bvh \
-      --out assets/body_models/soma/surface_lo.npz --fixture build/fixtures/soma_lbs_reference.npz
-  ```
-
-BONES-SEED data and anything derived from it (`seed_soma_shapes/`, `surface_*.npz`) is licensed and must
-not be committed or redistributed; `.gitignore` excludes it.
+The tests read clips from `SOMA_BVH_ROOT` (default `~/Downloads/soma_uniform/bvh`).
 
 ## Retarget (realtime solver, batched)
 
@@ -67,8 +57,7 @@ build/linux/x86_64/release/retarget validate out --human ~/Downloads/soma_unifor
 
 ```bash
 build/linux/x86_64/release/retarget teleop --viewer-port 8770      # ZeroMQ server on tcp://127.0.0.1:5560
-build/tools/venv/bin/pip install pyzmq                            # client dependency (once)
-cd python && ../build/tools/venv/bin/python -m retargeter_client ~/Downloads/soma_uniform/bvh/210531/walk_forward_amateur_001__A001.bvh
+build/tools/venv/bin/python -m retargeter_client ~/Downloads/soma_uniform/bvh/210531/walk_forward_amateur_001__A001.bvh
 ```
 
 `--lag 0.04` adds the fixed-lag window: each frame is refined for 40 ms of newer input (stance lock, ground, dynamics,

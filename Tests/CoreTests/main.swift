@@ -73,7 +73,7 @@ for (dir, expected) in [("g1_29_dof", g1_29Order), ("g1_23_dof", g1_23Order)] {
     }
 }
 
-let sampleBVH = "/home/troja/Downloads/soma_uniform/bvh/230322/sweep_floor_side_walk_R_004__A298.bvh"
+let sampleBVH = bvhRoot + "230322/sweep_floor_side_walk_R_004__A298.bvh"
 
 test("load SOMA BVH") {
     let start = ContinuousClock.now

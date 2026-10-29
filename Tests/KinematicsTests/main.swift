@@ -18,7 +18,7 @@ func maxError(_ a: [[Transform]], _ b: [[Transform]]) -> (position: Double, rota
 
 let g1Dir = repositoryRoot + "/assets/robots/unitree_g1"
 let robots = try ["g1_29_dof", "g1_23_dof"].map { try RobotUSDLoader.load(directory: g1Dir + "/" + $0) }
-let motion = try BVH.load(file: "/home/troja/Downloads/soma_uniform/bvh/230322/sweep_floor_side_walk_R_004__A298.bvh")
+let motion = try BVH.load(file: bvhRoot + "230322/sweep_floor_side_walk_R_004__A298.bvh")
 let humanReference = (0..<motion.frameCount).map { motion.globalTransforms(frame: $0) }
 
 // MARK: - Body surface (CPU reference)

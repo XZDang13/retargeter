@@ -4,6 +4,13 @@
 import Glibc
 #endif
 
+/// Root of the SOMA uniform BVH clips (BONES-SEED): $SOMA_BVH_ROOT, else ~/Downloads/soma_uniform/bvh; with a
+/// trailing slash.
+let bvhRoot: String = {
+    if let env = getenv("SOMA_BVH_ROOT") { return String(cString: env).hasSuffix("/") ? String(cString: env) : String(cString: env) + "/" }
+    return (getenv("HOME").map { String(cString: $0) } ?? "") + "/Downloads/soma_uniform/bvh/"
+}()
+
 nonisolated(unsafe) var testFailures = 0
 nonisolated(unsafe) var currentTest = ""
 

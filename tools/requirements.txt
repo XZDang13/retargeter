@@ -1,0 +1,4 @@
+# Tooling venv (build/tools/venv, made by setup.sh): robot mesh export for the viewer and the teleop client.
+numpy==2.5.4
+usd-core==26.3
+pyzmq==27.2.0

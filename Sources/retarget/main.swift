@@ -10,7 +10,7 @@ import Glibc
 let usage = """
 usage: retarget <command> [options]
   view [--port N] [--motions DIR]   serve the browser viewer on http://127.0.0.1:N (default 8080);
-                                    --motions: human BVH root (default ~/Downloads/soma_uniform/bvh)
+                                    --motions: human BVH root (default $SOMA_BVH_ROOT or ~/Downloads/soma_uniform/bvh)
   realtime <inputs>... [options]    batch-retarget BVH files with the causal solver (see retarget realtime --help)
   offline <inputs>... [options]     batch-retarget with the whole-trajectory solver (same options)
   validate <files>... --human DIR   validate robot motions (.npz / soma-retargeter .csv) against their source clips
@@ -37,7 +37,8 @@ case "view":
     }
     let home = getenv("HOME").map { String(cString: $0) } ?? ""
     let config = ViewerConfiguration(repositoryRoot: root,
-                                     motionRoot: option("--motions") ?? home + "/Downloads/soma_uniform/bvh",
+                                     motionRoot: option("--motions") ?? getenv("SOMA_BVH_ROOT").map { String(cString: $0) }
+                                         ?? home + "/Downloads/soma_uniform/bvh",
                                      port: UInt16(option("--port") ?? "8080") ?? 8080)
     do {
         try ViewerApp(config: config).run()

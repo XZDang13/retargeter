@@ -6,7 +6,6 @@ import Core
 import Kinematics
 import MotionIO
 
-let bvhRoot = "/home/troja/Downloads/soma_uniform/bvh/"
 let surface = try BodySurface.load(file: repositoryRoot + "/assets/body_models/soma/surface_lo.npz")
 let groups = try ContactGroups.soma(surface)
 let device = try ComputeDevice.makeDefault(backend: .cuda)
