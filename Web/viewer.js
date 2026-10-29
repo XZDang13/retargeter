@@ -84,6 +84,7 @@ scene.add(robot.root);
 async function loadRobot(name) {
   const model = await fetchJSON(`/api/robot?name=${encodeURIComponent(name)}`);
   const gltf = await gltfLoader.loadAsync(model.mesh);
+  if (ui.robot.value !== name) return; // superseded by another switch
   // Each top-level glTF node is one exported /Geometries/<name> (a Mesh, or a Group of Meshes).
   const meshes = new Map(gltf.scene.children.map((o) => [o.name, o]));
 
@@ -114,23 +115,29 @@ async function loadRobotMotion() {
   if (kind === 'retarget' || kind === 'offline') {
     if (!human.file) return; // loaded again once a human clip is selected
     const file = human.file;
-    const previous = ui.status.textContent.replace(/ · robot: .*$/, '');
+    const previous = ui.status.textContent.replace(/ · (robot: |retargeting onto ).*$/, '');
     ui.status.textContent = `${previous} · retargeting onto ${ui.robot.value} (${kind === 'offline' ? 'offline' : 'realtime'})…`;
     const motion = await fetchPacked(`/api/retarget?name=${name}&file=${encodeURIComponent(file)}&mode=${kind === 'offline' ? 'offline' : 'realtime'}`);
-    if (human.file !== file || ui.robotMotion.value !== kind) return; // superseded
+    if (human.file !== file || ui.robotMotion.value !== kind || ui.robot.value !== decodeURIComponent(name)) return; // superseded
     robot.motion = motion;
     const v = motion.header.validation;
     robot.verdict = v ? (v.status === 'accepted' ? 'robot: accepted' : `robot: REJECTED (${v.reasons.join('; ')})`) : '';
     ui.status.textContent = `${previous} · ${robot.verdict}`;
   } else {
-    robot.motion = await fetchPacked(`/api/robot_demo?name=${name}&demo=${kind}`);
+    const motion = await fetchPacked(`/api/robot_demo?name=${name}&demo=${kind}`);
+    if (ui.robotMotion.value !== kind || ui.robot.value !== decodeURIComponent(name)) return; // superseded
+    robot.motion = motion;
   }
   resetTimeline();
 }
 
 function poseRobot(t) {
   const m = robot.motion;
-  if (!m || !robot.links.length) return;
+  // A motion of another robot (between a robot switch and its new motion) has a different link count: hidden
+  // until its own arrives rather than posed from it.
+  const fits = !!m && m.header.links === robot.links.length;
+  for (const link of robot.links) link.visible = fits;
+  if (!fits) return;
   const { fps, frames, links } = m.header;
   const f = frameAt(t, fps, frames);
   const { pos, rot } = m.blocks;
@@ -450,6 +457,8 @@ function applyVisibility() {
 }
 
 function tick(now) {
+  // The next frame is requested first: an exception in one frame must not stop the render loop for good.
+  requestAnimationFrame(tick);
   const dt = (now - clock.last) / 1000;
   clock.last = now;
   const total = duration();
@@ -464,7 +473,6 @@ function tick(now) {
   ui.time.textContent = `${clock.t.toFixed(2)} s`;
   controls.update();
   renderer.render(scene, camera);
-  requestAnimationFrame(tick);
 }
 
 function setPlaying(playing) {
@@ -478,7 +486,11 @@ function setPlaying(playing) {
 ui.play.addEventListener('click', () => setPlaying(!clock.playing));
 ui.scrub.addEventListener('input', () => { clock.t = (ui.scrub.value / 1000) * duration(); setPlaying(false); });
 for (const el of [ui.mode, ui.layout, ui.showSurface, ui.showSkeleton]) el.addEventListener('change', applyVisibility);
-ui.robot.addEventListener('change', async () => { await loadRobot(ui.robot.value); await loadRobotMotion(); });
+ui.robot.addEventListener('change', async () => {
+  robot.motion = null; // the old robot's motion does not fit the new links
+  await loadRobot(ui.robot.value);
+  await loadRobotMotion();
+});
 ui.robotMotion.addEventListener('change', loadRobotMotion);
 ui.dir.addEventListener('change', () => loadFiles(ui.dir.value));
 ui.contactMode.addEventListener('change', loadContacts);
