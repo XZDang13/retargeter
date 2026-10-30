@@ -62,6 +62,8 @@
     "collision_band": 0.03,
     "root_acceleration": 60,
     "hand_acceleration": 300,
+    "acceleration_limit": 5.0,
+    "acceleration_limit_margin": 0.9,
     "dynamics": 3.0,
     "dynamics_model": "contact_forces",
     "friction": 0.7,

@@ -958,6 +958,19 @@ retargeter/
   status: each one these rules touched (dance slide ZMP 0.053, kneeling heels, crowd_cheer collision 0.021) has
   another reject. The sample accepted 121 at that point (was 123 on 2026-10-28); 122 after the kneeling-only
   foot reach above (still out: sit_on_heels_start_005__A024, tracking 0.088, 0.086 without the reach).
+- Joint acceleration limit in the offline solver (2026-10-30, user's pick over relaxing the threshold). BONES-SEED
+  (136,872 clips after the stair / climb / chair filter, 118,416 accepted) lost 5,178 clips to
+  `joint_acc_ratio_max`, 2,508 to it alone (median 1.3x): mostly shoulder pitch / roll in fast arm swings
+  (dances, cheering, jumps), then waist and hip pitch. Tracking was good (2.7 cm): the person moves faster than
+  the G1's effort limits allow. Raising the uniform acceleration smoothing 60 → 120 / 240 left the ratios as they
+  were (1.45 → 1.58 / 1.68) and added self-collision rejects: it damps frame-to-frame jitter, not 50-100 ms
+  bursts. New term (`acceleration_limit` 5, `acceleration_limit_margin` 0.9): per joint, a one-sided residual
+  |a| / limit − 1 on the second differences over frames t ± K (the dynamics stride, 25 ms, the band the validator
+  judges), against the effort-limited acceleration at each frame's warm-start pose (computed from the warm
+  start's forward kinematics; the old per-frame ancestor walk took 0.7 ms a frame and tripled the run). Off in
+  fixed-lag windows. 10 acceleration-only rejects: 0 → 10 accepted (ratios 0.85-1.02), tracking mean / p95
+  unchanged to 0.1 mm; 10 jump clips: ratios ≤ 1.03 (were up to 2.7), 0 → 6 accepted (the rest:
+  `dyn_flight_residual_max`); 10 accepted clips unchanged. Solver time unchanged.
 
 ## 15. Open questions
 

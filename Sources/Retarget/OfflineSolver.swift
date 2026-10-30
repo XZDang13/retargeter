@@ -3,6 +3,7 @@
 
 import Compute
 import Core
+import Dynamics
 import Kinematics
 
 #if canImport(Glibc)
@@ -37,6 +38,7 @@ public final class OfflineSolver {
     let handPairs: [(Int, Int)]
     let armTargets: [Int32]
     let linkSegment: [SIMD4<Int32>]   // (first, last target, arm: 1 / body: 0, -)
+    let dynamics: RobotDynamics
 
     public init(device: ComputeDevice, setup: RetargetSetup, geometry: RobotGeometry) throws {
         guard device.backend == .cuda else { throw ComputeError(message: "the offline solver needs a GPU backend (v1: CUDA)") }
@@ -46,6 +48,7 @@ public final class OfflineSolver {
         kernel = try device.loadKernel(module: "offline_ik_group", entryPoint: "sweep")
         windowKernel = try device.loadKernel(module: "offline_ik_group", entryPoint: "sweepWindow")
         let robot = setup.robot
+        dynamics = RobotDynamics(robot: robot)
         guard geometry.soles.count == 2, geometry.soles.allSatisfy({ $0.points.count == 4 }) else {
             throw ComputeError(message: "offline solver expects two feet with four sole points")
         }
@@ -191,7 +194,7 @@ public final class OfflineSolver {
         precondition(links.count <= 40 && robot.dofCount <= 30 && setup.mapping.targets.count <= 18,
                      "offline kernel limits: 40 links, 30 dofs, 18 targets")
         scratch = Dictionary(uniqueKeysWithValues: ((0..<Self.maxColors).map { "frameList\($0)" } + [
-            "frameRange", "trajRootPos", "trajRootRot", "trajQ", "outCostOffline",
+            "frameRange", "accelerationLimit", "trajRootPos", "trajRootRot", "trajQ", "outCostOffline",
             "goalPos", "goalRot", "soleAnchor", "linkGroundContact", "trajLinkCom", "contactPoint", "frameFps", "contactLambda",
             "trajSole", "trajPatch",
         ]).map { ($0, ScratchBuffer(device: device)) })
@@ -212,6 +215,9 @@ public final class OfflineSolver {
         var rootPos: [SIMD4<Float>] = [], rootRot: [SIMD4<Float>] = [], qs: [Float] = []
         var goalPos: [SIMD4<Float>] = [], goalRot: [SIMD4<Float>] = [], contact: [Float] = []
         var frameFps: [Float] = [], linkCom: [SIMD4<Float>] = []
+        // Joint acceleration limits per frame: effort-limited at the warm-start pose (the validator judges each frame
+        // at its own pose), times the margin.
+        var accelerationLimit: [Float] = []
         for clip in clips {
             let first = rootPos.count
             offsets.append(first)
@@ -230,6 +236,9 @@ public final class OfflineSolver {
                 frameFps.append(Float(clip.fps))
                 let world = robot.forwardKinematics(root: clip.initial.root[f], q: clip.initial.q[f])
                 linkCom += robot.links.indices.map { world[$0].apply(robot.links[$0].inertial?.centerOfMass ?? .zero).device }
+                if o.accelerationLimit > 0 {
+                    accelerationLimit += dynamics.effortLimitedAcceleration(world: world).map { Float(min($0 * o.accelerationLimitMargin, 1e6)) }
+                }
                 precondition(clip.goals[f].count == T && clip.linkContact[f].count == L)
             }
         }
@@ -246,6 +255,7 @@ public final class OfflineSolver {
             .buffer("trajLinkCom", try buf("trajLinkCom", linkCom)),
             .buffer("contactLambda", try buf("contactLambda", [Float](repeating: 0, count: frames * Self.contactPoints * 4))), .buffer("frameFps", try buf("frameFps", frameFps)),
             .value("referenceWeight", Float(0)), .value("referenceRootWeight", Float(0)),
+            .buffer("accelerationLimit", try buf("accelerationLimit", accelerationLimit.isEmpty ? [Float(0)] : accelerationLimit)),
         ]
         let listBuffers = try (0..<colors).map { try buf("frameList\($0)", lists[$0].isEmpty ? [Int32(0)] : lists[$0]) }
 
@@ -307,6 +317,8 @@ public final class OfflineSolver {
             return mask
         }
         var arguments: [KernelArgument] = model.map { .buffer($0.key, $0.value) }
+        // Fixed-lag windows leave the acceleration limit off (no per-frame limits); batch solves bind theirs.
+        if window != nil { arguments.append(.buffer("accelerationLimit", try device.makeBuffer([Float(0)]))) }
         arguments += [
             .value("numLinks", UInt32(L)), .value("numDofs", UInt32(n)), .value("numTargets", UInt32(T)),
             .buffer("linkDepth", try device.makeBuffer(linkDepth)), .value("maxDepth", UInt32(linkDepth.max() ?? 0)),
@@ -326,6 +338,7 @@ public final class OfflineSolver {
             .value("smoothLinks", SIMD2<Int32>(Int32(robot.linkIndex(named: "left_wrist_yaw_link") ?? robot.linkIndex(named: "left_wrist_roll_link") ?? -1),
                                                Int32(robot.linkIndex(named: "right_wrist_yaw_link") ?? robot.linkIndex(named: "right_wrist_roll_link") ?? -1))),
             .value("linkAccelerationWeight", Float(o.handAcceleration)),
+            .value("accelerationLimitWeight", Float(window == nil ? o.accelerationLimit : 0)),
             .value("rootAccelerationWeight", Float(o.rootAcceleration)), .value("dynamicsWeight", Float(window ?? o.dynamics)),
             .value("friction", Float(o.friction)), .value("totalMass", Float(robot.totalMass)),
             .value("contactIterations", UInt32(o.contactIterations)),

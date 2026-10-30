@@ -83,6 +83,10 @@ public struct RetargetMapping: Sendable {
         public var rootAcceleration = 60.0
         /// Weight of the hands' position second differences (per frame, metres).
         public var handAcceleration = 300.0
+        /// Weight of the joint acceleration limit (|q̈| / effort-limited acceleration - 1 where positive, over frames
+        /// t ± dynamics stride); 0 disables. The limit is taken at `accelerationLimitMargin` of the effort-limited one.
+        public var accelerationLimit = 0.0
+        public var accelerationLimitMargin = 0.9
         /// Weight of the centroidal-dynamics residual (unexplained wrench in units of m·g); 0 disables.
         public var dynamics = 3.0
         /// "contact_forces": contact forces solved per frame (friction cones); "force_free" (experimental): CoM
@@ -196,6 +200,8 @@ public struct RetargetMapping: Sendable {
             offline.collisionBand = o["collision_band"]?.double ?? offline.collisionBand
             offline.rootAcceleration = o["root_acceleration"]?.double ?? offline.rootAcceleration
             offline.handAcceleration = o["hand_acceleration"]?.double ?? offline.handAcceleration
+            offline.accelerationLimit = o["acceleration_limit"]?.double ?? offline.accelerationLimit
+            offline.accelerationLimitMargin = o["acceleration_limit_margin"]?.double ?? offline.accelerationLimitMargin
             offline.dynamics = o["dynamics"]?.double ?? offline.dynamics
             offline.dynamicsModel = o["dynamics_model"]?.string ?? offline.dynamicsModel
             guard ["contact_forces", "force_free"].contains(offline.dynamicsModel) else {

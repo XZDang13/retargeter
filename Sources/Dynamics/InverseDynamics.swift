@@ -83,6 +83,7 @@ public struct RobotDynamics: Sendable {
     public let totalMass: Double
     public let effort: [Double]   // per dof (N·m), .infinity when unknown
     public let dofLink: [Int]     // per dof: link index
+    let subtree: [[Int]]          // per dof: the links its joint moves (its link and descendants)
 
     public init(robot: RobotModel) {
         self.robot = robot
@@ -110,6 +111,13 @@ public struct RobotDynamics: Sendable {
         }
         self.effort = effort
         self.dofLink = dofLink
+        subtree = dofLink.map { lj in
+            robot.links.indices.filter { i in
+                var k: Int? = i
+                while let x = k, x != lj { k = robot.links[x].parent }
+                return k == lj
+            }
+        }
     }
 
     /// Forward pass: link poses, velocities and accelerations.
@@ -221,16 +229,21 @@ public struct RobotDynamics: Sendable {
     /// the joint about its axis + rotor armature), in `state`'s pose (default: the default pose, legs straight:
     /// the largest leg inertias) without gravity load; infinity without an effort limit.
     public func effortLimitedAcceleration(_ state: RobotState? = nil) -> [Double] {
-        let m = motion(state ?? RobotState(root: robot.defaultRootPose, q: Array(repeating: 0, count: robot.dofCount)))
-        return (0..<robot.dofCount).map { j in
-            let lj = dofLink[j], axis = m.axis[lj], o = m.jointOrigin[lj]
-            var inertia = robot.links[lj].limits?.armature ?? 0
-            for i in robot.links.indices {
-                var k: Int? = i
-                while let x = k, x != lj { k = robot.links[x].parent }
-                guard k == lj else { continue }
-                let r = cross(axis, m.com[i] - o)
-                inertia += mass[i] * dot(r, r) + dot(axis, inertiaTimes(i, m.pose[i], axis))
+        let s = state ?? RobotState(root: robot.defaultRootPose, q: Array(repeating: 0, count: robot.dofCount))
+        return effortLimitedAcceleration(world: robot.forwardKinematics(root: s.root, q: s.q))
+    }
+
+    /// The same from the link poses (`RobotModel.forwardKinematics`).
+    public func effortLimitedAcceleration(world: [Transform]) -> [Double] {
+        (0..<robot.dofCount).map { j in
+            let lj = dofLink[j], link = robot.links[lj]
+            guard case .revolute(let localAxis) = link.joint, let p = link.parent else { return .infinity }
+            let frame = world[p] * link.jointOrigin
+            let axis = frame.rotation.rotate(localAxis), o = frame.translation
+            var inertia = link.limits?.armature ?? 0
+            for i in subtree[j] {
+                let r = cross(axis, world[i].apply(comLocal[i]) - o)
+                inertia += mass[i] * dot(r, r) + dot(axis, inertiaTimes(i, world[i], axis))
             }
             return inertia > 0 ? effort[j] / inertia : .infinity
         }

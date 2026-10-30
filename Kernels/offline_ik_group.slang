@@ -131,6 +131,10 @@ uniform uint dynamicsStride;    // K: dynamics accelerations use frames t ± K (
 uniform uint forceFree;         // 1: force-free CoM support terms instead of the contact-force solve
 uniform int2 smoothLinks;       // links whose position acceleration is penalised (hands), -1: none
 uniform float linkAccelerationWeight;
+// Joint acceleration limits: a one-sided penalty on the second differences over frames s ± K (the validator's band)
+// that exceed the effort-limited acceleration at the frame's warm-start pose, residual (|a| / limit - 1) per joint.
+uniform float accelerationLimitWeight;           // 0: off
+uniform StructuredBuffer<float> accelerationLimit;   // [frame * numDofs] rad/s² (already scaled by the margin)
 uniform float maxJointStep;     // rad per step
 uniform float maxRootStep;      // m per step
 
@@ -1162,6 +1166,27 @@ void solveFrame(uint frame, uint lane, bool finalRows)
             if (m1 && m2) { h += wa; gv += wa * (q - 2.0 * qm1 + qm2); }
             if (m1 && p1) { h += 4.0 * wa; gv += -2.0 * wa * (qp1 - 2.0 * q + qm1); }
             if (p1 && p2) { h += wa; gv += wa * (qp2 - 2.0 * qp1 + q); }
+            if (accelerationLimitWeight > 0.0)
+            {
+                // Second differences centred at c = t - K, t, t + K (frame t's coefficient 1, -2, 1).
+                int K = int(dynamicsStride);
+                float dt2 = float(K * K) / (frameFps[frame] * frameFps[frame]);
+                for (int k = -1; k <= 1; k++)
+                {
+                    int c = f + k * K;
+                    if (c - K < range.x || c + K >= range.y)
+                        continue;
+                    float qa = c - K == f ? q : trajQ[uint(c - K) * n + j];
+                    float qc = c == f ? q : trajQ[uint(c) * n + j];
+                    float qb = c + K == f ? q : trajQ[uint(c + K) * n + j];
+                    float d = qb - 2.0 * qc + qa, dmax = accelerationLimit[uint(c) * n + j] * dt2;
+                    if (abs(d) <= dmax)
+                        continue;
+                    float u = accelerationLimitWeight / dmax, coef = k == 0 ? -2.0 : 1.0;
+                    h += u * u * coef * coef;
+                    gv += u * u * coef * sign(d) * (abs(d) - dmax);
+                }
+            }
             float wp = posture * posture;
             h += wp;
             gv += wp * q;
