@@ -2,6 +2,7 @@
 import Glibc
 #elseif canImport(Darwin)
 import Darwin
+import MachO   // _NSGetExecutablePath
 #endif
 
 /// Locates the repository root: `$RETARGETER_ROOT`, or the first ancestor of the running executable
@@ -9,10 +10,7 @@ import Darwin
 public enum RepositoryLocation {
     public static func root() -> String? {
         if let env = getenv("RETARGETER_ROOT") { return String(cString: env) }
-        var buffer = [CChar](repeating: 0, count: 4096)
-        let n = readlink("/proc/self/exe", &buffer, buffer.count - 1)
-        guard n > 0 else { return nil }
-        var dir = String(decoding: buffer[0..<n].map { UInt8(bitPattern: $0) }, as: UTF8.self)
+        guard var dir = executablePath() else { return nil }
         while let slash = dir.lastIndex(of: "/"), slash != dir.startIndex {
             dir = String(dir[..<slash])
             if access(dir + "/xmake.lua", F_OK) == 0 && access(dir + "/assets", F_OK) == 0 { return dir }
@@ -37,4 +35,19 @@ public func listDirectory(_ path: String) -> [(name: String, isDirectory: Bool)]
         out.append((name, entry.pointee.d_type == UInt8(DT_DIR)))
     }
     return out.sorted { $0.0 < $1.0 }
+}
+
+/// Absolute path of the running executable.
+public func executablePath() -> String? {
+    var buffer = [CChar](repeating: 0, count: 4096)
+    #if os(macOS)
+    var size = UInt32(buffer.count)
+    guard _NSGetExecutablePath(&buffer, &size) == 0, let real = realpath(buffer, nil) else { return nil }
+    defer { free(real) }
+    return String(cString: real)
+    #else
+    let n = readlink("/proc/self/exe", &buffer, buffer.count - 1)
+    guard n > 0 else { return nil }
+    return String(decoding: buffer[0..<n].map { UInt8(bitPattern: $0) }, as: UTF8.self)
+    #endif
 }

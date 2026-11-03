@@ -5,6 +5,8 @@ set_xmakever("3.0.0")
 add_rules("mode.release", "mode.debug")
 set_defaultmode("release")
 set_languages("c11", "cxx17")
+-- Same product path on every platform: build/release/retarget (build/debug/... in debug mode).
+set_targetdir("$(builddir)/$(mode)")
 
 includes("xmake/packages.lua", "xmake/swift.lua")
 add_requires("slang-rhi 2026.10.23")
@@ -18,11 +20,14 @@ target("rtcompute")
     add_includedirs("native/include", {public = true})
     add_packages("slang-rhi", "slang")
     set_symbols("hidden")
-    add_rpathdirs("$ORIGIN")
+    add_rpathdirs(is_plat("macosx") and "@loader_path" or "$ORIGIN")
+    if is_plat("macosx") then
+        add_ldflags("-install_name @rpath/librtcompute.dylib", {force = true})
+    end
     after_build(function (target)
         -- Slang runtime libraries (compiler, llvm for the CPU backend, glslang, stdlib module) live next to us.
         local slang = target:pkg("slang")
-        os.cp(path.join(slang:installdir(), "lib", "*.so*"), target:targetdir())
+        os.cp(path.join(slang:installdir(), "lib", is_plat("macosx") and "*.dylib" or "*.so*"), target:targetdir())
         os.cp(path.join(slang:installdir(), "lib", "slang-standard-module-*"), target:targetdir())
     end)
 
@@ -32,9 +37,12 @@ target("rtnet")
     add_files("native/net/src/*.c")
     add_includedirs("native/net/include", {public = true})
     add_packages("zeromq")
-    add_syslinks("stdc++")
+    add_syslinks(is_plat("macosx") and "c++" or "stdc++")
     set_symbols("hidden")
     add_cflags("-fvisibility=default")
+    if is_plat("macosx") then
+        add_ldflags("-install_name @rpath/librtnet.dylib", {force = true})
+    end
 
 -- Swift modules (whole-module builds via xmake/swift.lua).
 target("Compute")
@@ -99,7 +107,7 @@ target("Viewer")
 target("retarget")
     set_kind("binary")
     add_rules("swiftpkg")
-    add_files("Sources/retarget/*.swift")
+    add_files("Sources/CLI/*.swift")
     add_deps("Net", "rtnet", "Viewer", "Validate", "Retarget", "Dynamics", "Contact", "Kinematics", "Compute", "MotionIO", "Core", "rtcompute")
 
 -- Tests: plain executables that exit non-zero on failure; run with `xmake test`.

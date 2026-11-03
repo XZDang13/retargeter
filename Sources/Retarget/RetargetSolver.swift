@@ -49,7 +49,7 @@ public final class RetargetSolver {
         self.device = device
         self.setup = setup
         // GPU: one cooperating 32-thread group per stream; CPU: one thread per stream (no group barriers).
-        cooperative = device.backend == .cuda
+        cooperative = device.backend.isGPU
         kernel = try device.loadKernel(module: cooperative ? "retarget_ik_group" : "retarget_ik",
                                        entryPoint: cooperative ? "solveGroup" : "solve")
         let robot = setup.robot
@@ -124,7 +124,7 @@ public final class RetargetSolver {
         scratch = Dictionary(uniqueKeysWithValues: [
             "targetWeight", "streamFrameOffset", "streamFrameCount", "goalPos", "goalRot", "stateRootPos", "stateRootRot",
             "stateQ", "stateValid", "outRootPos", "outRootRot", "outQ", "outCost",
-            "soleContact", "linkContactRT", "streamFps", "stateLinkCom", "stateHistory", "stateBranchQ", "stateBranch",
+            "soleContact", "linkContactRT", "streamFps", "stateLinkCom", "stateHistory", "stateBranchQ", "stateBranch", "jacobianScratch",
         ].map { ($0, ScratchBuffer(device: device)) })
     }
 
@@ -257,6 +257,11 @@ public final class RetargetSolver {
                 .value("branchKeep", UInt32(max(1, Int((s.branchKeep * rate).rounded())))),
                 .value("branchDwell", UInt32(max(1, Int((s.branchDwell * rate).rounded())))),
             ]
+            if device.backend == .metal {
+                // The dense Jacobian, in device memory on Metal (retarget_ik_group.slang: GJ, JACOBIAN_SIZE).
+                let jacobianSize = (6 * 24 + 6) * (6 + 32)
+                arguments.append(.buffer("jacobianScratch", try out("jacobianScratch", Float.self, streams * jacobianSize)))
+            }
         }
         try device.dispatch(kernel, threads: cooperative ? streams * 32 : streams, arguments: arguments)
         guard frames > 0 else { return goals.map { _ in [] } }

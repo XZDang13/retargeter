@@ -7,6 +7,8 @@ import Dynamics
 
 #if canImport(Glibc)
 import Glibc
+#elseif canImport(Darwin)
+import Darwin
 #endif
 
 let g1Dir = repositoryRoot + "/assets/robots/unitree_g1"

@@ -12,6 +12,8 @@ import Core
 
 #if canImport(Glibc)
 import Glibc
+#elseif canImport(Darwin)
+import Darwin
 #endif
 
 public let standardGravity = Vec3(0, 0, -9.81)
@@ -89,14 +91,16 @@ public struct RobotDynamics: Sendable {
         self.robot = robot
         mass = robot.links.map { $0.inertial?.mass ?? 0 }
         comLocal = robot.links.map { $0.inertial?.centerOfMass ?? .zero }
-        inertiaLocal = robot.links.map { link in
-            guard let inertial = link.inertial else { return Array(repeating: 0, count: 9) }
+        inertiaLocal = robot.links.map { link -> [Double] in
+            guard let inertial = link.inertial else { return [Double](repeating: 0, count: 9) }
             // I = R diag R^T with R the principal axes (principal frame -> link frame).
             let r = inertial.principalAxes.matrix, d = inertial.diagonalInertia
             var out = [Double](repeating: 0, count: 9)
             for i in 0..<3 {
                 for j in 0..<3 {
-                    out[3 * i + j] = (0..<3).reduce(0) { $0 + r[3 * i + $1] * d[$1] * r[3 * j + $1] }
+                    out[3 * i + j] = (0..<3).reduce(0.0) { (sum: Double, k: Int) -> Double in
+                        sum + r[3 * i + k] * d[k] * r[3 * j + k]
+                    }
                 }
             }
             return out

@@ -17,16 +17,45 @@ static const uint RT_ROWS = MAX_ROWS + 6;
 static const float3 RT_GRAVITY = float3(0.0, 0.0, -9.81);
 static const float RT_MOMENT_SCALE = 0.1;
 
-uniform StructuredBuffer<float4> linkCom;          // [numLinks] link-frame CoM, w = mass
-uniform StructuredBuffer<uint2> linkAncestors;     // [numLinks] bit l: link l is the link or an ancestor
-uniform StructuredBuffer<int> soleLink;            // [2]
-uniform StructuredBuffer<float4> solePoint;        // [8] link frame
-uniform StructuredBuffer<float> soleContact;       // [frame * 8] 1: the human heel / toe under this corner touches
-uniform StructuredBuffer<float> linkContactRT;     // [frame * numLinks] 1: mapped body part in contact (not feet)
-uniform StructuredBuffer<float> streamFps;         // [stream]
-uniform StructuredBuffer<uint> factorStructure;    // see setupShared
-uniform RWStructuredBuffer<float4> stateLinkCom;   // [(stream * HISTORY + slot) * numLinks + link]
-uniform RWStructuredBuffer<int> stateHistory;      // [stream] frames pushed into the ring
+// Global parameters, one parameter block: on Metal an argument buffer (a stage has only 31 buffer slots, the
+// solvers bind more); elsewhere a plain uniform struct. The host binds fields by name (rtcompute looks inside).
+struct RealtimeParams
+{
+#ifdef __METAL__
+    RWStructuredBuffer<float> jacobianScratch;   // [stream * JACOBIAN_SIZE] (see GJ)
+#endif
+    StructuredBuffer<float4> linkCom;          // [numLinks] link-frame CoM, w = mass
+    StructuredBuffer<uint2> linkAncestors;     // [numLinks] bit l: link l is the link or an ancestor
+    StructuredBuffer<int> soleLink;            // [2]
+    StructuredBuffer<float4> solePoint;        // [8] link frame
+    StructuredBuffer<float> soleContact;       // [frame * 8] 1: the human heel / toe under this corner touches
+    StructuredBuffer<float> linkContactRT;     // [frame * numLinks] 1: mapped body part in contact (not feet)
+    StructuredBuffer<float> streamFps;         // [stream]
+    StructuredBuffer<uint> factorStructure;    // see setupShared
+    RWStructuredBuffer<float4> stateLinkCom;   // [(stream * HISTORY + slot) * numLinks + link]
+    RWStructuredBuffer<int> stateHistory;      // [stream] frames pushed into the ring
+    StructuredBuffer<int> dofArm;              // [numDofs] 0, 1 left arm, 2 right arm
+    StructuredBuffer<int> targetArm;           // [numTargets] the arm a target belongs to (0: none)
+    RWStructuredBuffer<float> stateBranchQ;    // [stream * numDofs] the branch being blended in (arm dofs)
+    RWStructuredBuffer<int> stateBranch;       // [stream * 16] per arm: active, blend position, idle, direction, evidence
+    uint branchInterval;
+    float branchError;
+    uint branchIterations;
+    uint branchBlend;
+    float branchHysteresis;
+    uint branchKeep;
+    uint branchDwell;
+    float dynamicsWeight;
+    uint dynamicsStride;
+    float friction;
+    float totalMass;
+    uint contactIterations;
+};
+#ifdef __METAL__
+ParameterBlock<RealtimeParams> rt;
+#else
+uniform RealtimeParams rt;
+#endif
 // Arm branch switch: a warm-started arm that has run into a joint-limit corner (jump_right_003__A030: the arm raised
 // sideways reached through shoulder abduction, roll and yaw at their stops, 14 cm off for two seconds) cannot leave
 // it while the target moves on, and eventually snaps across in a frame or two. Every `branchInterval` frames an arm
@@ -36,24 +65,26 @@ uniform RWStructuredBuffer<int> stateHistory;      // [stream] frames pushed int
 // `branchBlend` frames, toward whichever tracks better (see branchSwitch). Switching in one frame moved joints up
 // to 3 rad; dropping the old branch at once switched crowd_cheer_001__A029 into one that went bad a second later.
 // branchBlend 0: off.
-uniform StructuredBuffer<int> dofArm;              // [numDofs] 0, 1 left arm, 2 right arm
-uniform StructuredBuffer<int> targetArm;           // [numTargets] the arm a target belongs to (0: none)
-uniform RWStructuredBuffer<float> stateBranchQ;    // [stream * numDofs] the branch being blended in (arm dofs)
-uniform RWStructuredBuffer<int> stateBranch;       // [stream * 16] per arm: active, blend position, idle, direction, evidence
-uniform uint branchInterval;
-uniform float branchError;
-uniform uint branchIterations;
-uniform uint branchBlend;
-uniform float branchHysteresis;
-uniform uint branchKeep;
-uniform uint branchDwell;
-uniform float dynamicsWeight;
-uniform uint dynamicsStride;
-uniform float friction;
-uniform float totalMass;
-uniform uint contactIterations;
 
+#ifdef __METAL__
+// Metal has 32 KB of threadgroup memory, too little for all of the below: the dense Jacobian (22.8 KB) lives in a
+// per-group slice of device scratch there, and the group barriers also order device memory (groupSync).
+groupshared uint gJBase;
+#define GJ(i) rt.jacobianScratch[gJBase + (i)]
+#else
 groupshared float gJ[RT_ROWS * MAX_VARS];   // dense weighted Jacobian rows (6 per target, 6 dynamics)
+#define GJ(i) gJ[i]
+#endif
+static const uint JACOBIAN_SIZE = RT_ROWS * MAX_VARS;   // floats of jacobianScratch per stream (Metal)
+
+void groupSync()
+{
+#ifdef __METAL__
+    AllMemoryBarrierWithGroupSync();
+#else
+    GroupMemoryBarrierWithGroupSync();
+#endif
+}
 groupshared float gR[RT_ROWS];              // weighted residuals
 static const uint HS = MAX_VARS + 1;        // gH row stride: odd, so a column read across lanes hits 32 banks
 groupshared float gH[MAX_VARS * HS];        // normal matrix, lower triangle (becomes the Cholesky factor)
@@ -115,7 +146,7 @@ groupshared float gDyn[6];
 /// the tree one level at a time (the links of a level in parallel).
 void forwardShared(uint lane)
 {
-    for (uint i = lane; i < numLinks; i += GROUP)
+    for (uint i = lane; i < ik.numLinks; i += GROUP)
     {
         int dof = gLinkDof[i];
         float4 r = gJointOriginRot[i];
@@ -129,10 +160,10 @@ void forwardShared(uint lane)
             gPos[i] = gRootPos;
         }
     }
-    GroupMemoryBarrierWithGroupSync();
+    groupSync();
     for (uint level = 1; level <= gMaxDepth; level++)
     {
-        for (uint i = lane; i < numLinks; i += GROUP)
+        for (uint i = lane; i < ik.numLinks; i += GROUP)
         {
             if (gDepth[i] != level)
                 continue;
@@ -147,25 +178,25 @@ void forwardShared(uint lane)
             gPos[i] = p + qrotate(r, gLocalPos[i]);
             gRot[i] = normalize(qmul(r, gLocalRot[i]));
         }
-        GroupMemoryBarrierWithGroupSync();
+        groupSync();
     }
 }
 
 /// Once per dispatch: model cache, link depths, column triple masks and the column pairs to sum.
 void setupShared(uint lane, uint nv)
 {
-    for (uint i = lane; i < numLinks; i += GROUP)
+    for (uint i = lane; i < ik.numLinks; i += GROUP)
     {
-        gJointOriginRot[i] = jointOriginRot[i];
-        gJointOriginPos[i] = jointOriginPos[i].xyz;
-        gJointToChildRot[i] = jointToChildRot[i];
-        gJointToChildPos[i] = jointToChildPos[i].xyz;
-        gJointAxis[i] = jointAxis[i].xyz;
-        gAxisLocal[i] = qrotate(jointOriginRot[i], jointAxis[i].xyz);
-        gLinkParent[i] = linkParent[i];
-        gLinkDof[i] = linkDof[i];
+        gJointOriginRot[i] = ik.jointOriginRot[i];
+        gJointOriginPos[i] = ik.jointOriginPos[i].xyz;
+        gJointToChildRot[i] = ik.jointToChildRot[i];
+        gJointToChildPos[i] = ik.jointToChildPos[i].xyz;
+        gJointAxis[i] = ik.jointAxis[i].xyz;
+        gAxisLocal[i] = qrotate(ik.jointOriginRot[i], ik.jointAxis[i].xyz);
+        gLinkParent[i] = ik.linkParent[i];
+        gLinkDof[i] = ik.linkDof[i];
         uint depth = 0;
-        for (int k = linkParent[i]; k >= 0; k = linkParent[k])
+        for (int k = ik.linkParent[i]; k >= 0; k = ik.linkParent[k])
             depth++;
         gDepth[i] = depth;
     }
@@ -173,36 +204,36 @@ void setupShared(uint lane, uint nv)
     // a row triple heaviest first, the minimum-degree elimination order and the factor's row / column lists). It
     // depends only on the model and the weights; derived here on one lane it cost ~3 ms per dispatch, which
     // dominated one-frame (teleop) dispatches.
-    uint pairCount = factorStructure[0], offPairs = factorStructure[1], offMask = factorStructure[2];
-    uint offInv = factorStructure[3], offColStart = factorStructure[4], offCol = factorStructure[5];
-    uint offRowStart = factorStructure[6], offRow = factorStructure[7], factorCount = factorStructure[8];
+    uint pairCount = rt.factorStructure[0], offPairs = rt.factorStructure[1], offMask = rt.factorStructure[2];
+    uint offInv = rt.factorStructure[3], offColStart = rt.factorStructure[4], offCol = rt.factorStructure[5];
+    uint offRowStart = rt.factorStructure[6], offRow = rt.factorStructure[7], factorCount = rt.factorStructure[8];
     for (uint k = lane; k < pairCount; k += GROUP)
-        gPairs[k] = factorStructure[offPairs + k];
+        gPairs[k] = rt.factorStructure[offPairs + k];
     for (uint a = lane; a < nv; a += GROUP)
     {
-        gColMask[a] = uint2(factorStructure[offMask + 2 * a], factorStructure[offMask + 2 * a + 1]);
-        gInv[a] = factorStructure[offInv + a];
+        gColMask[a] = uint2(rt.factorStructure[offMask + 2 * a], rt.factorStructure[offMask + 2 * a + 1]);
+        gInv[a] = rt.factorStructure[offInv + a];
     }
     for (uint j = lane; j <= nv; j += GROUP)
     {
-        gLColStart[j] = factorStructure[offColStart + j];
-        gLRowStart[j] = factorStructure[offRowStart + j];
+        gLColStart[j] = rt.factorStructure[offColStart + j];
+        gLRowStart[j] = rt.factorStructure[offRowStart + j];
     }
     for (uint e = lane; e < factorCount; e += GROUP)
     {
-        gLCol[e] = uint8_t(factorStructure[offCol + e]);
-        gLRow[e] = uint8_t(factorStructure[offRow + e]);
+        gLCol[e] = uint8_t(rt.factorStructure[offCol + e]);
+        gLRow[e] = uint8_t(rt.factorStructure[offRow + e]);
     }
-    GroupMemoryBarrierWithGroupSync();
+    groupSync();
     if (lane == 0)
     {
         uint depth = 0;
-        for (uint i = 0; i < numLinks; i++)
+        for (uint i = 0; i < ik.numLinks; i++)
             depth = max(depth, gDepth[i]);
         gMaxDepth = depth;
         gPairCount = pairCount;
     }
-    GroupMemoryBarrierWithGroupSync();
+    groupSync();
 }
 
 /// Sum over the rows of the triples in `mask` of gJ[row][a] * gJ[row][b].
@@ -217,9 +248,9 @@ float tripleDot(uint2 mask, uint a, uint b)
             uint bit = firstbitlow(m);
             m &= m - 1;
             uint row = 3 * (32 * word + bit);
-            sum += gJ[row * MAX_VARS + a] * gJ[row * MAX_VARS + b]
-                 + gJ[(row + 1) * MAX_VARS + a] * gJ[(row + 1) * MAX_VARS + b]
-                 + gJ[(row + 2) * MAX_VARS + a] * gJ[(row + 2) * MAX_VARS + b];
+            sum += GJ(row * MAX_VARS + a) * GJ(row * MAX_VARS + b)
+                 + GJ((row + 1) * MAX_VARS + a) * GJ((row + 1) * MAX_VARS + b)
+                 + GJ((row + 2) * MAX_VARS + a) * GJ((row + 2) * MAX_VARS + b);
         }
     }
     return sum;
@@ -236,8 +267,8 @@ float tripleResidual(uint2 mask, uint a)
             uint bit = firstbitlow(m);
             m &= m - 1;
             uint row = 3 * (32 * word + bit);
-            sum += gJ[row * MAX_VARS + a] * gR[row] + gJ[(row + 1) * MAX_VARS + a] * gR[row + 1]
-                 + gJ[(row + 2) * MAX_VARS + a] * gR[row + 2];
+            sum += GJ(row * MAX_VARS + a) * gR[row] + GJ((row + 1) * MAX_VARS + a) * gR[row + 1]
+                 + GJ((row + 2) * MAX_VARS + a) * gR[row + 2];
         }
     }
     return sum;
@@ -248,46 +279,46 @@ void targetRows(uint t, uint frame, uint nv)
 {
     // Only the entries the column masks select are read (see setupShared), and those are all written here
     // (no clearing): position rows in the root columns, rotation rows in the root rotation columns, the chain.
-    int link = targetLink[t];
-    float2 w = targetWeight[t];
+    int link = ik.targetLink[t];
+    float2 w = ik.targetWeight[t];
     float3 p = gPos[link];
-    uint chain0 = uint(chainStart[t]), chainN = uint(chainCount[t]);
+    uint chain0 = uint(ik.chainStart[t]), chainN = uint(ik.chainCount[t]);
     uint rowP = 6 * t, rowR = 6 * t + 3;
 
-    float3 rp = w.x * (p - goalPos[frame * numTargets + t].xyz);
+    float3 rp = w.x * (p - ik.goalPos[frame * ik.numTargets + t].xyz);
     float3 d = p - gRootPos;
-    float4 twist = targetTwist[t];
+    float4 twist = ik.targetTwist[t];
     float3 axis = qrotate(gRot[link], twist.xyz);
-    float3 rr = untwist(w.y * qlog(qmul(gRot[link], qconj(goalRot[frame * numTargets + t]))), axis, twist.w);
+    float3 rr = untwist(w.y * qlog(qmul(gRot[link], qconj(ik.goalRot[frame * ik.numTargets + t]))), axis, twist.w);
     for (uint row = 0; row < 3; row++)
     {
         gR[rowP + row] = rp[row];
         gR[rowR + row] = rr[row];
         for (uint c = 0; c < 3; c++)
-            gJ[(rowP + row) * MAX_VARS + c] = row == c ? w.x : 0.0;
+            GJ((rowP + row) * MAX_VARS + c) = row == c ? w.x : 0.0;
     }
     for (uint c = 0; c < 3; c++)
     {
         float3 col = untwist(float3(c == 0 ? w.y : 0.0, c == 1 ? w.y : 0.0, c == 2 ? w.y : 0.0), axis, twist.w);
         for (uint row = 0; row < 3; row++)
-            gJ[(rowR + row) * MAX_VARS + 3 + c] = col[row];
+            GJ((rowR + row) * MAX_VARS + 3 + c) = col[row];
     }
     float3 c0 = cross(float3(1, 0, 0), d), c1 = cross(float3(0, 1, 0), d), c2 = cross(float3(0, 0, 1), d);
     for (uint row = 0; row < 3; row++)
     {
-        gJ[(rowP + row) * MAX_VARS + 3] = w.x * c0[row];
-        gJ[(rowP + row) * MAX_VARS + 4] = w.x * c1[row];
-        gJ[(rowP + row) * MAX_VARS + 5] = w.x * c2[row];
+        GJ((rowP + row) * MAX_VARS + 3) = w.x * c0[row];
+        GJ((rowP + row) * MAX_VARS + 4) = w.x * c1[row];
+        GJ((rowP + row) * MAX_VARS + 5) = w.x * c2[row];
     }
     for (uint c = 0; c < chainN; c++)
     {
-        int l = chainLinks[chain0 + c];
-        uint col = 6 + uint(linkDof[l]);
+        int l = ik.chainLinks[chain0 + c];
+        uint col = 6 + uint(ik.linkDof[l]);
         float3 jp = cross(gAxis[l], p - gOrigin[l]), jr = untwist(w.y * gAxis[l], axis, twist.w);
         for (uint row = 0; row < 3; row++)
         {
-            gJ[(rowP + row) * MAX_VARS + col] = w.x * jp[row];
-            gJ[(rowR + row) * MAX_VARS + col] = jr[row];
+            GJ((rowP + row) * MAX_VARS + col) = w.x * jp[row];
+            GJ((rowR + row) * MAX_VARS + col) = jr[row];
         }
     }
 }
@@ -295,41 +326,41 @@ void targetRows(uint t, uint frame, uint nv)
 float3 rtStoredCom(uint stream, int frameNumber, uint link)
 {
     uint slot = uint(frameNumber) % HISTORY;
-    return stateLinkCom[(stream * HISTORY + slot) * numLinks + link].xyz;
+    return rt.stateLinkCom[(stream * HISTORY + slot) * ik.numLinks + link].xyz;
 }
 
 bool rtAncestor(uint ancestor, uint link)
 {
-    uint2 mask = linkAncestors[link];
+    uint2 mask = rt.linkAncestors[link];
     return ancestor < 32 ? ((mask.x >> ancestor) & 1) != 0 : ((mask.y >> (ancestor - 32)) & 1) != 0;
 }
 
 /// Dynamics rows (6 from `row0`) of the current frame; zero when the history is too short or disabled.
 void dynamicsRows(uint stream, uint frame, int history, uint lane, uint nv, uint row0)
 {
-    int K = int(dynamicsStride);
-    bool valid = dynamicsWeight > 0.0 && history >= 2 * K;
-    float rate = streamFps[stream] / float(K);
-    float mg = totalMass * 9.81;
-    for (uint i = lane; i < numLinks; i += GROUP)
+    int K = int(rt.dynamicsStride);
+    bool valid = rt.dynamicsWeight > 0.0 && history >= 2 * K;
+    float rate = rt.streamFps[stream] / float(K);
+    float mg = rt.totalMass * 9.81;
+    for (uint i = lane; i < ik.numLinks; i += GROUP)
     {
-        float3 c = gPos[i] + qrotate(gRot[i], linkCom[i].xyz);
+        float3 c = gPos[i] + qrotate(gRot[i], rt.linkCom[i].xyz);
         gC[i] = c;
         gA[i] = valid ? (c - 2.0 * rtStoredCom(stream, history - K, i) + rtStoredCom(stream, history - 2 * K, i)) * (rate * rate) - RT_GRAVITY
                       : float3(0, 0, 0);
     }
-    GroupMemoryBarrierWithGroupSync();
+    groupSync();
     if (lane == 0)
     {
         float3 com = float3(0, 0, 0);
-        for (uint i = 0; i < numLinks; i++)
-            com += linkCom[i].w * gC[i];
-        com /= totalMass;
+        for (uint i = 0; i < ik.numLinks; i++)
+            com += rt.linkCom[i].w * gC[i];
+        com /= rt.totalMass;
         gCom = com;
         float3 F = float3(0, 0, 0), N = float3(0, 0, 0);
-        for (uint i = 0; i < numLinks; i++)
+        for (uint i = 0; i < ik.numLinks; i++)
         {
-            float3 a = linkCom[i].w * gA[i];
+            float3 a = rt.linkCom[i].w * gA[i];
             F += a;
             N += cross(gC[i] - com, a);
         }
@@ -339,15 +370,15 @@ void dynamicsRows(uint stream, uint frame, int history, uint lane, uint nv, uint
         uint count = 0;
         for (uint k = 0; k < 8; k++)
         {
-            if (soleContact[frame * 8 + k] <= 0.0 || count >= RT_CONTACT_POINTS)
+            if (rt.soleContact[frame * 8 + k] <= 0.0 || count >= RT_CONTACT_POINTS)
                 continue;
-            int l = soleLink[k / 4];
-            float3 p = gPos[l] + qrotate(gRot[l], solePoint[k].xyz);
+            int l = rt.soleLink[k / 4];
+            float3 p = gPos[l] + qrotate(gRot[l], rt.solePoint[k].xyz);
             points[count++] = float3(p.xy, 0.0);
         }
-        for (uint l = 0; l < numLinks; l++)
+        for (uint l = 0; l < ik.numLinks; l++)
         {
-            if (linkContactRT[frame * numLinks + l] <= 0.0 || count >= RT_CONTACT_POINTS)
+            if (rt.linkContactRT[frame * ik.numLinks + l] <= 0.0 || count >= RT_CONTACT_POINTS)
                 continue;
             points[count++] = float3(gPos[l].xy, 0.0);
         }
@@ -355,14 +386,14 @@ void dynamicsRows(uint stream, uint frame, int history, uint lane, uint nv, uint
         float lambda[RT_CONTACT_POINTS * 4];
         for (uint c = 0; c < RT_CONTACT_POINTS * 4; c++)
             lambda[c] = 0.0;
-        for (uint it = 0; valid && it < contactIterations; it++)
+        for (uint it = 0; valid && it < rt.contactIterations; it++)
         {
             for (uint c = 0; c < count; c++)
             {
                 for (uint e = 0; e < 4; e++)
                 {
                     float2 t = e == 0 ? float2(1, 0) : (e == 1 ? float2(0, 1) : (e == 2 ? float2(-1, 0) : float2(0, -1)));
-                    float3 d = normalize(float3(friction * t, 1.0));
+                    float3 d = normalize(float3(rt.friction * t, 1.0));
                     float3 m = cross(points[c] - com, d) / RT_MOMENT_SCALE;
                     float old = lambda[c * 4 + e];
                     float next = max(0.0, old + (dot(d, rf) + dot(m, rn)) / (dot(d, d) + dot(m, m) + 1e-6));
@@ -374,23 +405,23 @@ void dynamicsRows(uint stream, uint frame, int history, uint lane, uint nv, uint
         }
         for (uint r = 0; r < 3; r++)
         {
-            gDyn[r] = valid ? dynamicsWeight * rf[r] : 0.0;
-            gDyn[3 + r] = valid ? dynamicsWeight * rn[r] : 0.0;
+            gDyn[r] = valid ? rt.dynamicsWeight * rf[r] : 0.0;
+            gDyn[3 + r] = valid ? rt.dynamicsWeight * rn[r] : 0.0;
         }
         gResForce = valid ? rf : float3(0, 0, 0);
     }
-    GroupMemoryBarrierWithGroupSync();
+    groupSync();
     for (uint col = lane; col < nv; col += GROUP)
     {
         float3 jF = float3(0, 0, 0), jN = float3(0, 0, 0), jC = float3(0, 0, 0);
         int dofLink = -1;
         if (col >= 6)
-            for (uint l = 0; l < numLinks; l++)
-                if (linkDof[l] == int(col) - 6)
+            for (uint l = 0; l < ik.numLinks; l++)
+                if (ik.linkDof[l] == int(col) - 6)
                     dofLink = int(l);
-        for (uint i = 0; valid && i < numLinks; i++)
+        for (uint i = 0; valid && i < ik.numLinks; i++)
         {
-            float m = linkCom[i].w;
+            float m = rt.linkCom[i].w;
             if (m <= 0.0)
                 continue;
             float3 J;
@@ -410,11 +441,11 @@ void dynamicsRows(uint stream, uint frame, int history, uint lane, uint nv, uint
             jC += m * J;
         }
         // The moment reference (the CoM) moves too: -dc x F_residual.
-        jN -= cross(jC / totalMass, gResForce * mg);
+        jN -= cross(jC / rt.totalMass, gResForce * mg);
         for (uint r = 0; r < 3; r++)
         {
-            gJ[(row0 + r) * MAX_VARS + col] = valid ? dynamicsWeight * jF[r] / mg : 0.0;
-            gJ[(row0 + 3 + r) * MAX_VARS + col] = valid ? dynamicsWeight * jN[r] / (mg * RT_MOMENT_SCALE) : 0.0;
+            GJ((row0 + r) * MAX_VARS + col) = valid ? rt.dynamicsWeight * jF[r] / mg : 0.0;
+            GJ((row0 + 3 + r) * MAX_VARS + col) = valid ? rt.dynamicsWeight * jN[r] / (mg * RT_MOMENT_SCALE) : 0.0;
         }
     }
     for (uint r = lane; r < 6; r += GROUP)
@@ -426,26 +457,26 @@ void dynamicsRows(uint stream, uint frame, int history, uint lane, uint nv, uint
 void gaussNewton(uint s, uint frame, uint frameIterations, float frameSmoothness, int dynamicsHistory, uint lane, uint nv,
                  uint rowDynamics)
 {
-    uint n = numDofs;
+    uint n = ik.numDofs;
     for (uint it = 0; it <= frameIterations; it++)
     {
         forwardShared(lane);
-        for (uint t = lane; t < numTargets; t += GROUP)
+        for (uint t = lane; t < ik.numTargets; t += GROUP)
             targetRows(t, frame, nv);
-        GroupMemoryBarrierWithGroupSync();
+        groupSync();
         if (it == frameIterations)
             break;
-        if (dynamicsWeight > 0.0)
+        if (rt.dynamicsWeight > 0.0)
         {
             dynamicsRows(s, frame, dynamicsHistory, lane, nv, rowDynamics);
-            GroupMemoryBarrierWithGroupSync();
+            groupSync();
         }
 
         // H = J^T J (lower triangle), g = J^T r, over the row triples each column pair shares; plus the
         // joint regularisers and damping on the diagonal.
         for (uint e = lane; e < nv * HS; e += GROUP)
             gH[e] = 0.0;
-        GroupMemoryBarrierWithGroupSync();
+        groupSync();
         for (uint k = lane; k < gPairCount; k += GROUP)
         {
             uint a = gPairs[k] & 0xff, b = gPairs[k] >> 8;
@@ -454,19 +485,19 @@ void gaussNewton(uint s, uint frame, uint frameIterations, float frameSmoothness
         }
         for (uint a = lane; a < nv; a += GROUP)
             gG[gInv[a]] = tripleResidual(gColMask[a], a);
-        GroupMemoryBarrierWithGroupSync();
+        groupSync();
         for (uint j = lane; j < n; j += GROUP)
         {
             uint v = 6 + j;
-            float2 lim = dofLimit[j];
-            float mid = 0.5 * (lim.x + lim.y), half = 0.5 * (lim.y - lim.x) * limitMargin;
-            float ws = frameSmoothness * frameSmoothness, wp = posture * posture;
+            float2 lim = ik.dofLimit[j];
+            float mid = 0.5 * (lim.x + lim.y), half = 0.5 * (lim.y - lim.x) * ik.limitMargin;
+            float ws = frameSmoothness * frameSmoothness, wp = ik.posture * ik.posture;
             float h = ws + wp;
             float gv = ws * (gQ[j] - gQPrev[j]) + wp * gQ[j];
             float excess = abs(gQ[j] - mid) - half;
             if (excess > 0.0)
             {
-                float wl = limitWeight * limitWeight;
+                float wl = ik.limitWeight * ik.limitWeight;
                 h += wl;
                 gv += wl * excess * sign(gQ[j] - mid);
             }
@@ -474,10 +505,10 @@ void gaussNewton(uint s, uint frame, uint frameIterations, float frameSmoothness
             gH[pv * HS + pv] += h;
             gG[pv] += gv;
         }
-        GroupMemoryBarrierWithGroupSync();
+        groupSync();
         for (uint v = lane; v < nv; v += GROUP)
-            gH[v * HS + v] += damping * (1.0 + gH[v * HS + v]);
-        GroupMemoryBarrierWithGroupSync();
+            gH[v * HS + v] += ik.damping * (1.0 + gH[v * HS + v]);
+        groupSync();
 
         // Right-looking sparse Cholesky in elimination order (lower triangle of gH becomes L, diagonal in
         // gDiag), fused with the forward substitution L y = g (y in gCol): step j scales column j's nonzero
@@ -500,7 +531,7 @@ void gaussNewton(uint s, uint frame, uint frameIterations, float frameSmoothness
                 gDiag[j] = d;
                 gCol[j] = y;
             }
-            GroupMemoryBarrierWithGroupSync();
+            groupSync();
             if (cn == 0)
                 continue;
             // Trailing update: the (e, e2 <= e) pairs of the column's rows, spread over the lanes.
@@ -514,7 +545,7 @@ void gaussNewton(uint s, uint frame, uint frameIterations, float frameSmoothness
                 uint i = gLCol[c0 + e], k = gLCol[c0 + p - e * (e + 1) / 2];
                 gH[i * HS + k] -= gL[i] * gL[k];
             }
-            GroupMemoryBarrierWithGroupSync();
+            groupSync();
         }
         // Backward substitution L^T x = y (y in gCol), step -x into gG.
         for (int i = int(nv) - 1; i >= 0; i--)
@@ -529,7 +560,7 @@ void gaussNewton(uint s, uint frame, uint frameIterations, float frameSmoothness
             }
             if (lane == 0)
                 gG[u] = -x;
-            GroupMemoryBarrierWithGroupSync();
+            groupSync();
         }
         if (lane == 0)
         {
@@ -538,10 +569,10 @@ void gaussNewton(uint s, uint frame, uint frameIterations, float frameSmoothness
         }
         for (uint j = lane; j < n; j += GROUP)
         {
-            float2 lim = dofLimit[j];
+            float2 lim = ik.dofLimit[j];
             gQ[j] = clamp(gQ[j] + gG[gInv[6 + j]], lim.x, lim.y);
         }
-        GroupMemoryBarrierWithGroupSync();
+        groupSync();
     }
 }
 
@@ -549,13 +580,13 @@ void gaussNewton(uint s, uint frame, uint frameIterations, float frameSmoothness
 float2 armTracking(int arm)
 {
     float cost = 0.0, error = 0.0;
-    for (uint t = 0; t < numTargets; t++)
+    for (uint t = 0; t < ik.numTargets; t++)
     {
-        if (targetArm[t] != arm)
+        if (rt.targetArm[t] != arm)
             continue;
         for (uint r = 0; r < 6; r++)
             cost += gR[6 * t + r] * gR[6 * t + r];
-        float w = targetWeight[t].x;
+        float w = ik.targetWeight[t].x;
         if (w > 0.0)
             error = max(error, length(float3(gR[6 * t], gR[6 * t + 1], gR[6 * t + 2])) / w);
     }
@@ -565,7 +596,7 @@ float2 armTracking(int arm)
 /// Saves the current solve (joints, previous joints, root) before another branch is solved in its place.
 void saveMain(uint lane)
 {
-    for (uint j = lane; j < numDofs; j += GROUP)
+    for (uint j = lane; j < ik.numDofs; j += GROUP)
     {
         gQMain[j] = gQ[j];
         gQMainPrev[j] = gQPrev[j];
@@ -575,15 +606,15 @@ void saveMain(uint lane)
         gRootPosMain = gRootPos;
         gRootRotMain = gRootRot;
     }
-    GroupMemoryBarrierWithGroupSync();
+    groupSync();
 }
 
 /// Copies the solved `arm`'s joints to gQBranch and puts the saved solve back.
 void restoreMain(uint lane, int arm)
 {
-    for (uint j = lane; j < numDofs; j += GROUP)
+    for (uint j = lane; j < ik.numDofs; j += GROUP)
     {
-        if (dofArm[j] == arm)
+        if (rt.dofArm[j] == arm)
             gQBranch[j] = gQ[j];
         gQ[j] = gQMain[j];
         gQPrev[j] = gQMainPrev[j];
@@ -593,7 +624,7 @@ void restoreMain(uint lane, int arm)
         gRootPos = gRootPosMain;
         gRootRot = gRootRotMain;
     }
-    GroupMemoryBarrierWithGroupSync();
+    groupSync();
 }
 
 /// The branch switch after a frame's solve (see `branchBlend`). Leaves the output pose in gQ / gRootPos / gRootRot
@@ -609,17 +640,17 @@ void restoreMain(uint lane, int arm)
 bool grounded(uint frame)
 {
     for (uint k = 0; k < 8; k++)
-        if (soleContact[frame * 8 + k] > 0.0)
+        if (rt.soleContact[frame * 8 + k] > 0.0)
             return true;
-    for (uint l = 0; l < numLinks; l++)
-        if (linkContactRT[frame * numLinks + l] > 0.0)
+    for (uint l = 0; l < ik.numLinks; l++)
+        if (rt.linkContactRT[frame * ik.numLinks + l] > 0.0)
             return true;
     return false;
 }
 
 bool branchSwitch(uint s, uint frame, int history, uint lane, uint nv, uint rowDynamics)
 {
-    uint n = numDofs;
+    uint n = ik.numDofs;
     bool any = false;
     bool airborne = !grounded(frame);
     float weight[2] = { -1.0, -1.0 };
@@ -630,38 +661,38 @@ bool branchSwitch(uint s, uint frame, int history, uint lane, uint nv, uint rowD
         gArmMain[0] = armTracking(1);
         gArmMain[1] = armTracking(2);
     }
-    GroupMemoryBarrierWithGroupSync();
+    groupSync();
     for (int arm = 1; arm <= 2; arm++)
     {
         uint b0 = uint(arm - 1) * 8;
         float costMain = gArmMain[arm - 1].x;
         if (gBranch[b0] == 0)
         {
-            if (branchInterval == 0 || uint(history) % branchInterval != 0 || gArmMain[arm - 1].y <= branchError)
+            if (rt.branchInterval == 0 || uint(history) % rt.branchInterval != 0 || gArmMain[arm - 1].y <= rt.branchError)
                 continue;
             saveMain(lane);
             for (uint j = lane; j < n; j += GROUP)
-                if (dofArm[j] == arm)
+                if (rt.dofArm[j] == arm)
                     gQ[j] = 0.0;
-            GroupMemoryBarrierWithGroupSync();
-            gaussNewton(s, frame, branchIterations, 0.0, history, lane, nv, rowDynamics);
+            groupSync();
+            gaussNewton(s, frame, rt.branchIterations, 0.0, history, lane, nv, rowDynamics);
         }
         else
         {
             // The alternative branch: warm from its last pose, smoothness against it.
             saveMain(lane);
             for (uint j = lane; j < n; j += GROUP)
-                if (dofArm[j] == arm)
+                if (rt.dofArm[j] == arm)
                 {
-                    gQ[j] = stateBranchQ[s * n + j];
-                    gQPrev[j] = stateBranchQ[s * n + j];
+                    gQ[j] = rt.stateBranchQ[s * n + j];
+                    gQPrev[j] = rt.stateBranchQ[s * n + j];
                 }
-            GroupMemoryBarrierWithGroupSync();
-            gaussNewton(s, frame, iterations, smoothness, history, lane, nv, rowDynamics);
+            groupSync();
+            gaussNewton(s, frame, ik.iterations, ik.smoothness, history, lane, nv, rowDynamics);
         }
         if (lane == 0)
             gArmCost = armTracking(arm).x;
-        GroupMemoryBarrierWithGroupSync();
+        groupSync();
         restoreMain(lane, arm);
         float costAlt = gArmCost;
         if (gBranch[b0] == 0)
@@ -679,53 +710,53 @@ bool branchSwitch(uint s, uint frame, int history, uint lane, uint nv, uint rowD
                 gBranch[b0 + 1] = 0;
                 gBranch[b0 + 2] = 0;
                 gBranch[b0 + 3] = clear ? 1 : 0;
-                gBranch[b0 + 4] = clear ? int(branchDwell) : 0;
+                gBranch[b0 + 4] = clear ? int(rt.branchDwell) : 0;
             }
         }
         for (uint j = lane; j < n; j += GROUP)
-            if (dofArm[j] == arm)
-                stateBranchQ[s * n + j] = gQBranch[j];
+            if (rt.dofArm[j] == arm)
+                rt.stateBranchQ[s * n + j] = gQBranch[j];
         // Merged: both branches within 0.05 rad on every arm joint.
         if (lane == 0)
         {
             float gap = 0.0;
             for (uint j = 0; j < n; j++)
-                if (dofArm[j] == arm)
+                if (rt.dofArm[j] == arm)
                     gap = max(gap, abs(gQBranch[j] - gQMain[j]));
             gKeep = gap < 0.05 ? 1 : 0;
         }
-        GroupMemoryBarrierWithGroupSync();
+        groupSync();
         int p = gBranch[b0 + 1], idle = gBranch[b0 + 2], dir = gBranch[b0 + 3], evidence = gBranch[b0 + 4];
-        if (costAlt < branchHysteresis * costMain)
+        if (costAlt < rt.branchHysteresis * costMain)
             evidence = max(evidence, 0) + 1;
-        else if (costMain < branchHysteresis * costAlt)
+        else if (costMain < rt.branchHysteresis * costAlt)
             evidence = min(evidence, 0) - 1;
         else
             evidence = 0;
-        if (evidence >= int(branchDwell))
+        if (evidence >= int(rt.branchDwell))
             dir = 1;
-        else if (evidence <= -int(branchDwell))
+        else if (evidence <= -int(rt.branchDwell))
             dir = -1;
         // At half speed while the person is airborne: the blend swings the arm through up to 3 rad, and in flight
         // nothing supplies the angular momentum that takes (reach_jump_R_002__A213: residual 1.0 m·g at full speed).
-        p = clamp(p + (airborne && history % 2 != 0 ? 0 : dir), 0, int(branchBlend));
-        bool swapped = uint(p) >= branchBlend;
+        p = clamp(p + (airborne && history % 2 != 0 ? 0 : dir), 0, int(rt.branchBlend));
+        bool swapped = uint(p) >= rt.branchBlend;
         idle = p == 0 && dir <= 0 ? idle + 1 : 0;
-        float x = float(p) / float(branchBlend);
+        float x = float(p) / float(rt.branchBlend);
         weight[arm - 1] = x * x * (3.0 - 2.0 * x);
         swap[arm - 1] = swapped;
         any = true;
-        GroupMemoryBarrierWithGroupSync();
+        groupSync();
         if (lane == 0)
         {
             gBranch[b0 + 1] = swapped ? 0 : p;
             gBranch[b0 + 2] = idle;
             gBranch[b0 + 3] = swapped ? -1 : dir;
             gBranch[b0 + 4] = swapped ? 0 : evidence;
-            if ((p == 0 && gKeep != 0) || uint(idle) >= branchKeep)
+            if ((p == 0 && gKeep != 0) || uint(idle) >= rt.branchKeep)
                 gBranch[b0] = 0;
         }
-        GroupMemoryBarrierWithGroupSync();
+        groupSync();
     }
     if (!any)
         return false;
@@ -733,18 +764,18 @@ bool branchSwitch(uint s, uint frame, int history, uint lane, uint nv, uint rowD
     saveMain(lane);
     for (uint j = lane; j < n; j += GROUP)
     {
-        int arm = dofArm[j];
+        int arm = rt.dofArm[j];
         if (arm == 0 || weight[arm - 1] < 0.0)
             continue;
-        float b = stateBranchQ[s * n + j];
+        float b = rt.stateBranchQ[s * n + j];
         gQ[j] = lerp(gQMain[j], b, weight[arm - 1]);
         if (swap[arm - 1])
         {
-            stateBranchQ[s * n + j] = gQMain[j];
+            rt.stateBranchQ[s * n + j] = gQMain[j];
             gQMain[j] = b;
         }
     }
-    GroupMemoryBarrierWithGroupSync();
+    groupSync();
     return true;
 }
 
@@ -754,35 +785,38 @@ void solveGroup(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID)
 {
     uint s = gid.x;
     uint lane = gtid.x;
-    if (s >= numStreams)
+    if (s >= ik.numStreams)
         return; // whole group exits together
-    uint n = numDofs;
+    uint n = ik.numDofs;
     uint nv = 6 + n;
-    uint rowDynamics = 6 * numTargets;
-    int offset = streamFrameOffset[s];
-    int frames = streamFrameCount[s];
-    int history = stateValid[s] != 0 ? stateHistory[s] : 0;
+    uint rowDynamics = 6 * ik.numTargets;
+    int offset = ik.streamFrameOffset[s];
+    int frames = ik.streamFrameCount[s];
+    int history = ik.stateValid[s] != 0 ? rt.stateHistory[s] : 0;
 
     if (lane == 0)
     {
-        if (stateValid[s] != 0)
+#ifdef __METAL__
+        gJBase = s * JACOBIAN_SIZE;
+#endif
+        if (ik.stateValid[s] != 0)
         {
-            gRootPos = stateRootPos[s].xyz;
-            gRootRot = stateRootRot[s];
+            gRootPos = ik.stateRootPos[s].xyz;
+            gRootRot = ik.stateRootRot[s];
             for (uint j = 0; j < n; j++)
-                gQ[j] = stateQ[s * n + j];
+                gQ[j] = ik.stateQ[s * n + j];
         }
         else
         {
-            gRootPos = goalPos[offset * numTargets + rootTarget].xyz;
-            gRootRot = goalRot[offset * numTargets + rootTarget];
+            gRootPos = ik.goalPos[offset * ik.numTargets + ik.rootTarget].xyz;
+            gRootRot = ik.goalRot[offset * ik.numTargets + ik.rootTarget];
             for (uint j = 0; j < n; j++)
                 gQ[j] = 0.0;
         }
     }
     if (lane < 16)
-        gBranch[lane] = branchBlend > 0 && stateValid[s] != 0 ? stateBranch[s * 16 + lane] : 0;
-    GroupMemoryBarrierWithGroupSync();
+        gBranch[lane] = rt.branchBlend > 0 && ik.stateValid[s] != 0 ? rt.stateBranch[s * 16 + lane] : 0;
+    groupSync();
 
     setupShared(lane, nv);
 
@@ -791,57 +825,57 @@ void solveGroup(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID)
         uint frame = uint(offset + f);
         for (uint j = lane; j < n; j += GROUP)
             gQPrev[j] = gQ[j];
-        GroupMemoryBarrierWithGroupSync();
+        groupSync();
 
         // A cold stream's first frame starts from q = 0: converge it fully and without the smoothness pull.
-        bool cold = f == 0 && stateValid[s] == 0;
-        uint frameIterations = cold ? max(iterations, coldIterations) : iterations;
-        float frameSmoothness = cold ? 0.0 : smoothness;
+        bool cold = f == 0 && ik.stateValid[s] == 0;
+        uint frameIterations = cold ? max(ik.iterations, ik.coldIterations) : ik.iterations;
+        float frameSmoothness = cold ? 0.0 : ik.smoothness;
 
         gaussNewton(s, frame, frameIterations, frameSmoothness, cold ? 0 : history, lane, nv, rowDynamics);
-        bool blended = branchBlend > 0 && !cold && branchSwitch(s, frame, history, lane, nv, rowDynamics);
+        bool blended = rt.branchBlend > 0 && !cold && branchSwitch(s, frame, history, lane, nv, rowDynamics);
         if (blended)
         {
             // gQ holds the output pose now: its link poses and tracking rows for the CoM ring and the cost.
             forwardShared(lane);
-            for (uint t = lane; t < numTargets; t += GROUP)
+            for (uint t = lane; t < ik.numTargets; t += GROUP)
                 targetRows(t, frame, nv);
-            GroupMemoryBarrierWithGroupSync();
+            groupSync();
         }
 
         // Push this frame's link CoMs into the history ring (gPos / gRot hold the final pose).
-        for (uint i = lane; i < numLinks; i += GROUP)
-            stateLinkCom[(s * HISTORY + uint(history) % HISTORY) * numLinks + i] = float4(gPos[i] + qrotate(gRot[i], linkCom[i].xyz), 0.0);
-        GroupMemoryBarrierWithGroupSync();
+        for (uint i = lane; i < ik.numLinks; i += GROUP)
+            rt.stateLinkCom[(s * HISTORY + uint(history) % HISTORY) * ik.numLinks + i] = float4(gPos[i] + qrotate(gRot[i], rt.linkCom[i].xyz), 0.0);
+        groupSync();
         history++;
         if (lane == 0)
         {
             float cost = 0.0;
             for (uint r = 0; r < rowDynamics; r++)
                 cost += gR[r] * gR[r];
-            outRootPos[frame] = float4(gRootPos, 0.0);
-            outRootRot[frame] = gRootRot;
+            ik.outRootPos[frame] = float4(gRootPos, 0.0);
+            ik.outRootRot[frame] = gRootRot;
             for (uint j = 0; j < n; j++)
-                outQ[frame * n + j] = gQ[j];
-            outCost[frame] = cost;
+                ik.outQ[frame * n + j] = gQ[j];
+            ik.outCost[frame] = cost;
         }
-        GroupMemoryBarrierWithGroupSync();
+        groupSync();
         if (blended)
         {
             for (uint j = lane; j < n; j += GROUP)
                 gQ[j] = gQMain[j];
-            GroupMemoryBarrierWithGroupSync();
+            groupSync();
         }
     }
 
     if (lane == 0)
     {
-        stateHistory[s] = history;
-        stateRootPos[s] = float4(gRootPos, 0.0);
-        stateRootRot[s] = gRootRot;
+        rt.stateHistory[s] = history;
+        ik.stateRootPos[s] = float4(gRootPos, 0.0);
+        ik.stateRootRot[s] = gRootRot;
         for (uint j = 0; j < n; j++)
-            stateQ[s * n + j] = gQ[j];
+            ik.stateQ[s * n + j] = gQ[j];
     }
-    if (lane < 16 && branchBlend > 0)
-        stateBranch[s * 16 + lane] = gBranch[lane];
+    if (lane < 16 && rt.branchBlend > 0)
+        rt.stateBranch[s * 16 + lane] = gBranch[lane];
 }

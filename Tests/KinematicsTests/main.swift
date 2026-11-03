@@ -1,4 +1,4 @@
-// Swift (double) vs Slang (float32) forward-kinematics parity on CUDA and CPU.
+// Swift (double) vs Slang (float32) forward-kinematics parity on the GPU (CUDA / Metal) and CPU.
 
 import Compute
 import Core
@@ -36,6 +36,8 @@ test("SOMA body surface vs SOMA-X reference") {
     let frames = try fixture["frames"]!.ints()
     let rot = try fixture["transform_rot"]!.doubles(), pos = try fixture["transform_pos"]!.doubles()
     let verts = try fixture["vertices"]!.doubles()
+    // The fixture's poses come from the BVH it was baked with (a clip, or the base rig of the shapes without clips).
+    let source = try fixture["bvh"]!.strings().first.flatMap { try? BVH.load(file: $0) } ?? motion
     let J = s.bind.count, V = s.vertexCount
     var exact = 0.0, pipeline = 0.0, feet = 0.0
     let footVertices = Set(s.restVertices.indices.filter { s.restVertices[$0].z < 0.12 })
@@ -47,7 +49,7 @@ test("SOMA body surface vs SOMA-X reference") {
         }
         let reference = (0..<V).map { v in Vec3(verts[(b * V + v) * 3], verts[(b * V + v) * 3 + 1], verts[(b * V + v) * 3 + 2]) }
         let ours = s.skin(world: somaWorld)
-        let fromBVH = s.skin(world: humanReference[frame])
+        let fromBVH = s.skin(world: source.globalTransforms(frame: frame))
         for v in 0..<V {
             exact = max(exact, length(ours[v] - reference[v]))
             let e = length(fromBVH[v] - reference[v])
@@ -63,7 +65,7 @@ test("SOMA body surface vs SOMA-X reference") {
     print("  frame 0 lowest vertex z: \(z0) m")
 }
 
-for backend in [Backend.cuda, .cpu] {
+for backend in [Backend.gpu, .cpu] {
     let device: ComputeDevice
     do { device = try ComputeDevice.makeDefault(backend: backend) } catch {
         test("[\(backend)] device") { throw error }
@@ -74,7 +76,7 @@ for backend in [Backend.cuda, .cpu] {
     for robot in robots {
         test("[\(backend)] robot FK parity \(robot.name)") {
             var rng = SplitMix64(state: 7)
-            let batch = backend == .cuda ? 4096 : 512
+            let batch = backend.isGPU ? 4096 : 512
             var roots: [Transform] = [], qs: [[Double]] = []
             for _ in 0..<batch {
                 let axis = normalize(Vec3(rng.uniform(-1, 1), rng.uniform(-1, 1), rng.uniform(-1, 1)))
@@ -106,7 +108,7 @@ for backend in [Backend.cuda, .cpu] {
     test("[\(backend)] surface skinning parity") {
         guard let surface else { throw NPYError(message: "surface not loaded") }
         let skinning = try SurfaceSkinning(device: device, surface: surface)
-        let frames = backend == .cuda ? Array(0..<motion.frameCount) : [0, 100, 400]
+        let frames = backend.isGPU ? Array(0..<motion.frameCount) : [0, 100, 400]
         let start = ContinuousClock.now
         let posed = try skinning.skin(world: frames.map { humanReference[$0] })
         let elapsed = ContinuousClock.now - start

@@ -8,7 +8,7 @@ import MotionIO
 
 let surface = try BodySurface.load(file: repositoryRoot + "/assets/body_models/soma/surface_lo.npz")
 let groups = try ContactGroups.soma(surface)
-let device = try ComputeDevice.makeDefault(backend: .cuda)
+let device = try ComputeDevice.makeDefault(backend: .gpu)
 let skinning = try SurfaceSkinning(device: device, surface: surface)
 
 @MainActor func pose(_ file: String) throws -> PosedSurface {
@@ -148,6 +148,8 @@ for c in cases {
 
 #if canImport(Glibc)
 import Glibc
+#elseif canImport(Darwin)
+import Darwin
 #endif
 if let file = getenv("CONTACT_DIAG").map({ String(cString: $0) }) {
     let posed = try pose(file)

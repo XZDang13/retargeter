@@ -1,7 +1,11 @@
-# Extra tooling for baking the SOMA body surface (tools/bake_soma_surface.py, needs the BONES-SEED shapes),
-# on top of requirements.txt. SOMA-X itself is cloned and installed by setup.sh. Torch is the CPU build.
+# Maintainers only: tools/export_soma_x_model.py, which runs SOMA-X itself (installed from its pinned source) to
+# export assets/body_models/soma/soma_x_model.npz and check the numpy bake against it. Setup does not need any of
+# this. Torch is the CPU build (on macOS the plain wheel, which has no +cpu variant).
 --extra-index-url https://download.pytorch.org/whl/cpu
-torch==2.10.0+cpu
+numpy==2.5.4     # same pins as requirements.txt
+usd-core==26.3   # SOMA-X imports pxr
+torch==2.10.0+cpu; sys_platform == "linux"
+torch==2.10.0; sys_platform == "darwin"
 scipy==1.18.1
 warp-lang==1.11.1
 trimesh==5.1.1

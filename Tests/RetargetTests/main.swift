@@ -1,4 +1,4 @@
-// Realtime (lag = 0) retargeting: solver recovery on robot-generated goals, real SOMA clips, CUDA/CPU
+// Realtime (lag = 0) retargeting: solver recovery on robot-generated goals, real SOMA clips, GPU/CPU
 // parity and batching.
 
 import Compute
@@ -11,6 +11,8 @@ import Validate
 
 #if canImport(Glibc)
 import Glibc
+#elseif canImport(Darwin)
+import Darwin
 #endif
 
 let g1 = repositoryRoot + "/assets/robots/unitree_g1/"
@@ -20,7 +22,7 @@ let surface = try BodySurface.load(file: repositoryRoot + "/assets/body_models/s
 let clips = ["210531/walk_forward_amateur_001__A001.bvh", "230322/sweep_floor_side_walk_R_004__A298.bvh",
              "220713/kneeling_loop_001__A021.bvh", "221010/jump_ff_180_R_001__A045.bvh"]
 let motions = try clips.map { try BVH.load(file: bvhRoot + $0) }
-let cuda = try ComputeDevice.makeDefault(backend: .cuda)
+let gpu = try ComputeDevice.makeDefault(backend: .gpu)
 
 extension String {
     func padding(_ n: Int) -> String { count >= n ? self : self + String(repeating: " ", count: n - count) }
@@ -68,7 +70,7 @@ if getenv("SUPPORT_DIAG") != nil {
     let geometry = try RobotGeometry(robot: robot, pointsFile: directory + "/mesh_points.npz")
     let validator = try Validator.load(repository: repositoryRoot, robot: robot, robotDirectory: directory)
     let motion = try BVH.load(file: bvhRoot + (getenv("SUPPORT_CLIP").map { String(cString: $0) } ?? "230322/body_check_001__A296.bvh"))
-    let offline = try OfflineRetargeter(device: cuda, robot: robot, mapping: try mapping("g1_29dof"), surface: surface,
+    let offline = try OfflineRetargeter(device: gpu, robot: robot, mapping: try mapping("g1_29dof"), surface: surface,
                                         skeleton: motion.skeleton, geometry: geometry)
     let prepared = try offline.prepare([motion])
     let start = try offline.base.solve(prepared)
@@ -92,7 +94,11 @@ if getenv("SUPPORT_DIAG") != nil {
             F += A
             N += cross(coms[t][i] - c, A)
         }
-        let pts = (0..<24).map { points[t * 24 + $0] }.filter { $0.w > 0 }.map { SIMD2(Double($0.x), Double($0.y)) }
+        var pts: [SIMD2<Double>] = []
+        for k in 0..<24 where points[t * 24 + k].w > 0 {
+            let p = points[t * 24 + k]
+            pts.append(SIMD2<Double>(Double(p.x), Double(p.y)))
+        }
         if pts.isEmpty { noContact += 1; continue }
         contactFrames += 1
         guard F.z > 0.3 * dyn.totalMass * 9.81 else { continue }
@@ -101,7 +107,7 @@ if getenv("SUPPORT_DIAG") != nil {
         var inside = true, best = Double.infinity
         let hull = pts   // all points; distance to segments between all pairs, inside via the convex hull
         func cross2(_ o: SIMD2<Double>, _ a: SIMD2<Double>, _ b: SIMD2<Double>) -> Double { (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x) }
-        let sorted = hull.sorted { $0.x < $1.x || ($0.x == $1.x && $0.y < $1.y) }
+        let sorted = hull.sorted { (a: SIMD2<Double>, b: SIMD2<Double>) -> Bool in a.x < b.x || (a.x == b.x && a.y < b.y) }
         var lower: [SIMD2<Double>] = [], upper: [SIMD2<Double>] = []
         for q in sorted { while lower.count >= 2 && cross2(lower[lower.count - 2], lower[lower.count - 1], q) <= 0 { lower.removeLast() }; lower.append(q) }
         for q in sorted.reversed() { while upper.count >= 2 && cross2(upper[upper.count - 2], upper[upper.count - 1], q) <= 0 { upper.removeLast() }; upper.append(q) }
@@ -130,7 +136,7 @@ if let file = getenv("HANDPAIR_DIAG").map({ String(cString: $0) }) {
     let (_, robot) = robots[0]
     let geometry = try RobotGeometry(robot: robot, pointsFile: g1 + "g1_29_dof/mesh_points.npz")
     let setup = try RetargetSetup(mapping: try mapping("g1_29dof"), robot: robot, skeleton: motions[0].skeleton, humanReference: surface.referencePose!)
-    let solver = try OfflineSolver(device: cuda, setup: setup, geometry: geometry)
+    let solver = try OfflineSolver(device: gpu, setup: setup, geometry: geometry)
     let outer = geometry.outerCapsules
     let m = try RobotMotionImport.npz(file: file)
     let center = Double(getenv("HANDPAIR_TIME").map { String(cString: $0) } ?? "0") ?? 0
@@ -223,7 +229,7 @@ if getenv("PAIR_DIAG") != nil {
     let (_, robot) = robots[0]
     let geometry = try RobotGeometry(robot: robot, pointsFile: g1 + "g1_29_dof/mesh_points.npz")
     let setup = try RetargetSetup(mapping: try mapping("g1_29dof"), robot: robot, skeleton: motions[0].skeleton, humanReference: surface.referencePose!)
-    let solver = try OfflineSolver(device: cuda, setup: setup, geometry: geometry)
+    let solver = try OfflineSolver(device: gpu, setup: setup, geometry: geometry)
     let names = { (p: (Int, Int)) in robot.links[p.0].name + "|" + robot.links[p.1].name }
     print("pairs: validator \(geometry.collisionPairs.count), solver \(solver.pairCount)")
     let outer = geometry.outerCapsules
@@ -254,7 +260,7 @@ if getenv("COLLIDE_DIAG") != nil {
         if let c { print("capsule \(robot.links[l].name): radius \(c.radius) length \(length(c.b - c.a)) points \(geometry.linkPoints[l].count)") }
     }
     print("pairs \(geometry.collisionPairs.count)")
-    let r = try HumanRetargeter(device: cuda, robot: robot, mapping: try mapping("g1_29dof"), surface: surface, skeleton: motions[0].skeleton)
+    let r = try HumanRetargeter(device: gpu, robot: robot, mapping: try mapping("g1_29dof"), surface: surface, skeleton: motions[0].skeleton)
     let traj = try r.retarget([motions[0]])[0].trajectory
     var worst: [String: Double] = [:]
     for f in stride(from: 0, to: traj.frameCount, by: 5) {
@@ -293,7 +299,7 @@ if getenv("ELBOW_DIAG") != nil {
 
 if getenv("TPOSE_DIAG") != nil {
     let (name, robot) = robots[0]
-    let r = try HumanRetargeter(device: cuda, robot: robot, mapping: try mapping(name), surface: surface, skeleton: motions[0].skeleton)
+    let r = try HumanRetargeter(device: gpu, robot: robot, mapping: try mapping(name), surface: surface, skeleton: motions[0].skeleton)
     let world = robot.forwardKinematics(root: r.referenceRobotPose.root, q: r.referenceRobotPose.q)
     let goals = r.setup.goals(human: surface.referencePose!)
     for (t, target) in r.setup.mapping.targets.enumerated() {
@@ -307,7 +313,7 @@ if getenv("TPOSE_DIAG") != nil {
 if getenv("IK_DIAG") != nil {
     let (name, robot) = robots[0]
     let setup = try RetargetSetup(mapping: try mapping(name), robot: robot, skeleton: motions[0].skeleton, humanReference: surface.referencePose!)
-    let solver = try RetargetSolver(device: cuda, setup: setup)
+    let solver = try RetargetSolver(device: gpu, setup: setup)
     var q = [Double](repeating: 0, count: robot.dofCount)
     let probe = Int(getenv("IK_DOF").map { atoi($0) } ?? 3)
     q[probe] = 0.5
@@ -336,7 +342,7 @@ for (name, robot) in robots {
     test("[\(name)] recovers robot-generated motion") {
         let m = try mapping(name)
         let setup = try RetargetSetup(mapping: m, robot: robot, skeleton: motions[0].skeleton, humanReference: surface.referencePose!)
-        let solver = try RetargetSolver(device: cuda, setup: setup)
+        let solver = try RetargetSolver(device: gpu, setup: setup)
         // Smooth joint trajectory inside 60 % of each range, root walking forward.
         let limits = robot.links.compactMap { l in l.dofIndex.map { ($0, l.limits!) } }.sorted { $0.0 < $1.0 }.map(\.1)
         var rng = SplitMix64(state: 3)
@@ -367,7 +373,7 @@ for (name, robot) in robots {
     }
 
     test("[\(name)] retarget SOMA clips (batched)") {
-        let retargeter = try HumanRetargeter(device: cuda, robot: robot, mapping: try mapping(name), surface: surface,
+        let retargeter = try HumanRetargeter(device: gpu, robot: robot, mapping: try mapping(name), surface: surface,
                                              skeleton: motions[0].skeleton)
         let start = ContinuousClock.now
         let results = try retargeter.retarget(motions)
@@ -375,7 +381,7 @@ for (name, robot) in robots {
         let frames = results.reduce(0) { $0 + $1.trajectory.frameCount }
         print("  \(clips.count) clips, \(frames) frames in \(elapsed): prepare (FK, skinning, contacts, goals) \(retargeter.lastTiming.prepare), IK \(retargeter.lastTiming.solve)")
         for (clip, r) in zip(clips, results) {
-            let world = try SkeletonFK(device: cuda, skeleton: retargeter.setup.skeleton).compute(try BVH.load(file: bvhRoot + clip))
+            let world = try SkeletonFK(device: gpu, skeleton: retargeter.setup.skeleton).compute(try BVH.load(file: bvhRoot + clip))
             let goals = retargeter.goals(world: world, ground: r.contacts.ground)
             let (pos, rot) = trackingErrors(retargeter.setup, r.trajectory, goals)
             let mean = pos.reduce(0, +) / Double(pos.count)
@@ -386,9 +392,9 @@ for (name, robot) in robots {
         }
     }
 
-    test("[\(name)] batched = individual, CUDA = CPU") {
+    test("[\(name)] batched = individual, GPU = CPU") {
         let m = try mapping(name)
-        let retargeter = try HumanRetargeter(device: cuda, robot: robot, mapping: m, surface: surface, skeleton: motions[0].skeleton)
+        let retargeter = try HumanRetargeter(device: gpu, robot: robot, mapping: m, surface: surface, skeleton: motions[0].skeleton)
         let short = motions.map { HumanMotion(skeleton: $0.skeleton, fps: $0.fps, local: Array($0.local.prefix(240))) }
         let batched = try retargeter.retarget(short)
         let single = try retargeter.retarget([short[1]])[0]
@@ -400,7 +406,7 @@ for (name, robot) in robots {
         let cpuRetargeter = try HumanRetargeter(device: cpu, robot: robot, mapping: m, surface: surface, skeleton: motions[0].skeleton)
         let cpuResult = try cpuRetargeter.retarget([short[1]])[0]
         let dqBackend = zip(cpuResult.trajectory.q, single.trajectory.q).flatMap { zip($0.0, $0.1).map { abs($0.0 - $0.1) } }.max()!
-        print("  CUDA vs CPU max |Δq| over 240 frames: \(dqBackend) rad")
+        print("  GPU vs CPU max |Δq| over 240 frames: \(dqBackend) rad")
         expect(dqBackend < 1e-2, "backend parity")
     }
 }
@@ -433,7 +439,7 @@ test("[g1_29dof] live streams reproduce the batch realtime solve") {
     // Two streams stepped one frame per tick, the second joining later and on another slot, against one batch
     // solve of both clips: same CPU stage, same kernel, solver state carried on the device between ticks.
     let (_, robot) = robots[0]
-    let r = try HumanRetargeter(device: cuda, robot: robot, mapping: try mapping("g1_29dof"), surface: surface,
+    let r = try HumanRetargeter(device: gpu, robot: robot, mapping: try mapping("g1_29dof"), surface: surface,
                                 skeleton: motions[0].skeleton)
     let a = HumanMotion(skeleton: motions[0].skeleton, fps: motions[0].fps, local: Array(motions[0].local.prefix(400)))
     let b = HumanMotion(skeleton: motions[1].skeleton, fps: motions[1].fps, local: Array(motions[1].local.prefix(300)))
@@ -479,9 +485,9 @@ test("[g1_29dof] arm branch switch: eases out of a joint-limit corner, live = ba
         let arm = robot.dofNames.indices.filter { ["shoulder", "elbow"].contains(where: robot.dofNames[$0].contains) }
         return zip(q, q.dropFirst()).map { a, b in arm.map { abs(b[$0] - a[$0]) * fps }.max()! }.max()!
     }
-    let r = try HumanRetargeter(device: cuda, robot: robot, mapping: try mapping("g1_29dof"), surface: surface,
+    let r = try HumanRetargeter(device: gpu, robot: robot, mapping: try mapping("g1_29dof"), surface: surface,
                                 skeleton: motion.skeleton)
-    let rOff = try HumanRetargeter(device: cuda, robot: robot, mapping: off, surface: surface, skeleton: motion.skeleton)
+    let rOff = try HumanRetargeter(device: gpu, robot: robot, mapping: off, surface: surface, skeleton: motion.skeleton)
     let on = try r.retarget([motion])[0].trajectory, snapped = try rOff.retarget([motion])[0].trajectory
     let peakOn = peakArmSpeed(on.q, motion.fps), peakOff = peakArmSpeed(snapped.q, motion.fps)
     print("  peak shoulder / elbow speed \(peakOff) -> \(peakOn) rad/s; mean cost \(snapped.cost.reduce(0, +) / Double(snapped.cost.count)) -> \(on.cost.reduce(0, +) / Double(on.cost.count))")
@@ -503,7 +509,7 @@ test("[g1_29dof] kneeling: shins point back like the person's (foot goals within
     var unclamped = try mapping("g1_29dof")
     for t in unclamped.targets.indices { unclamped.targets[t].reach = nil }
     @MainActor func splay(_ m: RetargetMapping) throws -> (mean: Double, max: Double) {
-        let r = try HumanRetargeter(device: cuda, robot: robot, mapping: m, surface: surface, skeleton: motion.skeleton)
+        let r = try HumanRetargeter(device: gpu, robot: robot, mapping: m, surface: surface, skeleton: motion.skeleton)
         let traj = try r.retarget([motion])[0].trajectory
         let s = motion.skeleton
         let human = ["LeftLeg", "RightLeg", "LeftShin", "LeftFoot"].map { s.jointIndex(named: $0)! }
@@ -536,7 +542,7 @@ test("[g1_29dof] live fixed lag reproduces the batch lagged solve") {
     let (_, robot) = robots[0]
     let directory = g1 + "g1_29_dof"
     let geometry = try RobotGeometry(robot: robot, pointsFile: directory + "/mesh_points.npz")
-    let lagged = try LaggedRetargeter(device: cuda, robot: robot, mapping: try mapping("g1_29dof"), surface: surface,
+    let lagged = try LaggedRetargeter(device: gpu, robot: robot, mapping: try mapping("g1_29dof"), surface: surface,
                                       skeleton: motions[0].skeleton, geometry: geometry, lag: 0.04, sweeps: 2, tickRate: 50)
     let a = HumanMotion(skeleton: motions[0].skeleton, fps: motions[0].fps, local: Array(motions[0].local.prefix(240)))
     let b = HumanMotion(skeleton: motions[3].skeleton, fps: motions[3].fps, local: Array(motions[3].local.prefix(200)))
@@ -578,7 +584,7 @@ test("[g1_29dof] offline improves on realtime (walk) and is deterministic") {
     let directory = g1 + "g1_29_dof"
     let geometry = try RobotGeometry(robot: robot, pointsFile: directory + "/mesh_points.npz")
     let validator = try Validator.load(repository: repositoryRoot, robot: robot, robotDirectory: directory)
-    let offline = try OfflineRetargeter(device: cuda, robot: robot, mapping: try mapping("g1_29dof"), surface: surface,
+    let offline = try OfflineRetargeter(device: gpu, robot: robot, mapping: try mapping("g1_29dof"), surface: surface,
                                         skeleton: motions[0].skeleton, geometry: geometry)
     let walk = HumanMotion(skeleton: motions[0].skeleton, fps: motions[0].fps, local: Array(motions[0].local.prefix(1200)))
     let prepared = try offline.prepare([walk])
@@ -612,7 +618,7 @@ test("[g1_29dof] offline dynamics: jump flight") {
     let directory = g1 + "g1_29_dof"
     let geometry = try RobotGeometry(robot: robot, pointsFile: directory + "/mesh_points.npz")
     let validator = try Validator.load(repository: repositoryRoot, robot: robot, robotDirectory: directory)
-    let offline = try OfflineRetargeter(device: cuda, robot: robot, mapping: try mapping("g1_29dof"), surface: surface,
+    let offline = try OfflineRetargeter(device: gpu, robot: robot, mapping: try mapping("g1_29dof"), surface: surface,
                                         skeleton: motions[3].skeleton, geometry: geometry)
     let prepared = try offline.prepare([motions[3]])
     let realtime = try offline.base.solve(prepared)[0]
@@ -645,7 +651,7 @@ test("[g1_29dof] offline: clasped hands move smoothly") {
     let geometry = try RobotGeometry(robot: robot, pointsFile: directory + "/mesh_points.npz")
     let validator = try Validator.load(repository: repositoryRoot, robot: robot, robotDirectory: directory)
     let motion = try BVH.load(file: bvhRoot + "230124/i_got_this_002__A143.bvh")
-    let offline = try OfflineRetargeter(device: cuda, robot: robot, mapping: try mapping("g1_29dof"), surface: surface,
+    let offline = try OfflineRetargeter(device: gpu, robot: robot, mapping: try mapping("g1_29dof"), surface: surface,
                                         skeleton: motion.skeleton, geometry: geometry)
     let prepared = try offline.prepare([motion])
     let realtime = try offline.base.solve(prepared)[0], solved = try offline.solve(prepared)[0]
@@ -673,7 +679,7 @@ test("[g1_29dof] offline keeps the robot above the ground when goals go below it
     let (_, robot) = robots[0]
     let directory = g1 + "g1_29_dof"
     let geometry = try RobotGeometry(robot: robot, pointsFile: directory + "/mesh_points.npz")
-    let offline = try OfflineRetargeter(device: cuda, robot: robot, mapping: try mapping("g1_29dof"), surface: surface,
+    let offline = try OfflineRetargeter(device: gpu, robot: robot, mapping: try mapping("g1_29dof"), surface: surface,
                                         skeleton: motions[0].skeleton, geometry: geometry)
     var prepared = try offline.prepare([HumanMotion(skeleton: motions[0].skeleton, fps: motions[0].fps,
                                                     local: Array(motions[0].local.prefix(240)))])[0]

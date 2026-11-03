@@ -9,6 +9,8 @@ import Validate
 
 #if canImport(Glibc)
 import Glibc
+#elseif canImport(Darwin)
+import Darwin
 #endif
 
 let g1 = repositoryRoot + "/assets/robots/unitree_g1/g1_29_dof"

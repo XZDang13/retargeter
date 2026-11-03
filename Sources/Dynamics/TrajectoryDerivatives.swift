@@ -6,6 +6,8 @@ import Core
 
 #if canImport(Glibc)
 import Glibc
+#elseif canImport(Darwin)
+import Darwin
 #endif
 
 public enum TrajectoryDerivatives {

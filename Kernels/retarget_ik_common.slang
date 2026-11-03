@@ -23,54 +23,64 @@ static const uint MAX_ROWS = 6 * MAX_TARGETS;
 static const uint GROUP = 32;
 
 // Robot model (same layout as robot_fk.slang).
-uniform StructuredBuffer<int> linkParent;
-uniform StructuredBuffer<int> linkDof;
-uniform StructuredBuffer<float4> jointOriginRot;
-uniform StructuredBuffer<float4> jointOriginPos;
-uniform StructuredBuffer<float4> jointToChildRot;
-uniform StructuredBuffer<float4> jointToChildPos;
-uniform StructuredBuffer<float4> jointAxis;
-uniform StructuredBuffer<float2> dofLimit;       // [numDofs] (lower, upper)
+// Global parameters, one parameter block: on Metal an argument buffer (a stage has only 31 buffer slots, the
+// solvers bind more); elsewhere a plain uniform struct. The host binds fields by name (rtcompute looks inside).
+struct RetargetParams
+{
+    StructuredBuffer<int> linkParent;
+    StructuredBuffer<int> linkDof;
+    StructuredBuffer<float4> jointOriginRot;
+    StructuredBuffer<float4> jointOriginPos;
+    StructuredBuffer<float4> jointToChildRot;
+    StructuredBuffer<float4> jointToChildPos;
+    StructuredBuffer<float4> jointAxis;
+    StructuredBuffer<float2> dofLimit;       // [numDofs] (lower, upper)
+    StructuredBuffer<int> targetLink;        // [numTargets]
+    StructuredBuffer<float2> targetWeight;   // [numTargets] (pos, rot)
+    StructuredBuffer<float4> targetTwist;
+    StructuredBuffer<int> chainStart;        // [numTargets] into chainLinks
+    StructuredBuffer<int> chainCount;
+    StructuredBuffer<int> chainLinks;        // actuated ancestors (incl. self) of each target link
+    StructuredBuffer<int> streamFrameOffset; // first frame of each stream in the frame arrays
+    StructuredBuffer<int> streamFrameCount;
+    StructuredBuffer<float4> goalPos;        // [frame * numTargets]
+    StructuredBuffer<float4> goalRot;        // [frame * numTargets] (xyzw)
+    RWStructuredBuffer<float4> stateRootPos; // [stream] in/out warm-start state
+    RWStructuredBuffer<float4> stateRootRot; // [stream]
+    RWStructuredBuffer<float> stateQ;        // [stream * numDofs]
+    StructuredBuffer<int> stateValid;        // [stream] 0: initialise from the first frame's root goal
+    RWStructuredBuffer<float4> outRootPos;   // [frame]
+    RWStructuredBuffer<float4> outRootRot;   // [frame]
+    RWStructuredBuffer<float> outQ;          // [frame * numDofs]
+    RWStructuredBuffer<float> outCost;       // [frame] final tracking cost
+    uint numStreams;
+    uint numLinks;
+    uint numDofs;
+    uint numTargets;
+    uint rootTarget;     // index of the target whose goal initialises the root
+    uint iterations;
+    uint coldIterations;   // iterations for the first frame of a cold stream
+    float damping;
+    float smoothness;
+    float posture;
+    float limitMargin;
+    float limitWeight;
+};
+#ifdef __METAL__
+ParameterBlock<RetargetParams> ik;
+#else
+uniform RetargetParams ik;
+#endif
 
 // Targets (static description).
-uniform StructuredBuffer<int> targetLink;        // [numTargets]
-uniform StructuredBuffer<float2> targetWeight;   // [numTargets] (pos, rot)
 // [numTargets] link-frame axis (xyz) and the weight (w, of the rotation weight) of the rotation residual about it:
 // a hand target's twist about the forearm, the least reliable part of a captured hand orientation (1: plain).
-uniform StructuredBuffer<float4> targetTwist;
 
 /// Removes the share 1 - twist.w of a rotation row vector's component along the twist axis `a` (world).
 float3 untwist(float3 v, float3 a, float keep) { return v - (1.0 - keep) * dot(a, v) * a; }
-uniform StructuredBuffer<int> chainStart;        // [numTargets] into chainLinks
-uniform StructuredBuffer<int> chainCount;
-uniform StructuredBuffer<int> chainLinks;        // actuated ancestors (incl. self) of each target link
 
 // Per stream.
-uniform StructuredBuffer<int> streamFrameOffset; // first frame of each stream in the frame arrays
-uniform StructuredBuffer<int> streamFrameCount;
-uniform StructuredBuffer<float4> goalPos;        // [frame * numTargets]
-uniform StructuredBuffer<float4> goalRot;        // [frame * numTargets] (xyzw)
-uniform RWStructuredBuffer<float4> stateRootPos; // [stream] in/out warm-start state
-uniform RWStructuredBuffer<float4> stateRootRot; // [stream]
-uniform RWStructuredBuffer<float> stateQ;        // [stream * numDofs]
-uniform StructuredBuffer<int> stateValid;        // [stream] 0: initialise from the first frame's root goal
-uniform RWStructuredBuffer<float4> outRootPos;   // [frame]
-uniform RWStructuredBuffer<float4> outRootRot;   // [frame]
-uniform RWStructuredBuffer<float> outQ;          // [frame * numDofs]
-uniform RWStructuredBuffer<float> outCost;       // [frame] final tracking cost
 
-uniform uint numStreams;
-uniform uint numLinks;
-uniform uint numDofs;
-uniform uint numTargets;
-uniform uint rootTarget;     // index of the target whose goal initialises the root
-uniform uint iterations;
-uniform uint coldIterations;   // iterations for the first frame of a cold stream
-uniform float damping;
-uniform float smoothness;
-uniform float posture;
-uniform float limitMargin;
-uniform float limitWeight;
 
 float4 qconj(float4 q) { return float4(-q.xyz, q.w); }
 
@@ -103,9 +113,9 @@ struct Pose
 
 void forward(inout Pose pose, float3 rootPos, float4 rootRot, float q[MAX_DOFS])
 {
-    for (uint i = 0; i < numLinks; i++)
+    for (uint i = 0; i < ik.numLinks; i++)
     {
-        int parent = linkParent[i];
+        int parent = ik.linkParent[i];
         if (parent < 0)
         {
             pose.rot[i] = rootRot;
@@ -113,18 +123,18 @@ void forward(inout Pose pose, float3 rootPos, float4 rootRot, float q[MAX_DOFS])
             continue;
         }
         float4 r = pose.rot[parent];
-        float3 p = pose.pos[parent] + qrotate(r, jointOriginPos[i].xyz);
-        r = qmul(r, jointOriginRot[i]);
-        int dof = linkDof[i];
+        float3 p = pose.pos[parent] + qrotate(r, ik.jointOriginPos[i].xyz);
+        r = qmul(r, ik.jointOriginRot[i]);
+        int dof = ik.linkDof[i];
         if (dof >= 0)
         {
-            float3 a = jointAxis[i].xyz;
+            float3 a = ik.jointAxis[i].xyz;
             pose.axis[i] = qrotate(r, a);
             pose.origin[i] = p;
             r = qmul(r, qaxisAngle(a, q[dof]));
         }
-        p = p + qrotate(r, jointToChildPos[i].xyz);
-        pose.rot[i] = normalize(qmul(r, jointToChildRot[i]));
+        p = p + qrotate(r, ik.jointToChildPos[i].xyz);
+        pose.rot[i] = normalize(qmul(r, ik.jointToChildRot[i]));
         pose.pos[i] = p;
     }
 }

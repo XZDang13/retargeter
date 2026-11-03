@@ -46,25 +46,90 @@ static const float3 GRAVITY = float3(0.0, 0.0, -9.81);
 static const float MOMENT_SCALE = 0.1;
 static const float ZMP_MARGIN = 0.02;   // force-free mode: ZMP kept this far inside the support polygon
 
-uniform StructuredBuffer<int> frameList;          // frames of the current colour (global frame index)
-uniform StructuredBuffer<int2> frameRange;        // [frame] (first, end) frame of its clip
-uniform RWStructuredBuffer<float4> trajRootPos;   // [frame] current iterate
-uniform RWStructuredBuffer<float4> trajRootRot;   // [frame]
-uniform RWStructuredBuffer<float> trajQ;          // [frame * numDofs]
-uniform RWStructuredBuffer<float> outCostOffline; // [frame] tracking cost after the update
+// Global parameters, one parameter block: on Metal an argument buffer (a stage has only 31 buffer slots, the
+// solvers bind more); elsewhere a plain uniform struct. The host binds fields by name (rtcompute looks inside).
+struct OfflineParams
+{
+    StructuredBuffer<int> frameList;          // frames of the current colour (global frame index)
+    StructuredBuffer<int2> frameRange;        // [frame] (first, end) frame of its clip
+    RWStructuredBuffer<float4> trajRootPos;   // [frame] current iterate
+    RWStructuredBuffer<float4> trajRootRot;   // [frame]
+    RWStructuredBuffer<float> trajQ;          // [frame * numDofs]
+    RWStructuredBuffer<float> outCostOffline; // [frame] tracking cost after the update
+    StructuredBuffer<int> linkChainStart;     // [numLinks] into linkChainLinks
+    StructuredBuffer<int> linkChainCount;
+    StructuredBuffer<int> linkChainLinks;     // actuated ancestors (incl. self) of every link
+    StructuredBuffer<int> soleLink;           // [2]
+    StructuredBuffer<float4> solePoint;       // [8] link-frame sole points (foot k: 4k..4k+3)
+    StructuredBuffer<float4> soleAnchor;      // [frame * 8] (x, y, vertical weight factor, weight); target
+    StructuredBuffer<float4> capsuleA;        // [numLinks] link frame, w = radius (0: no capsule)
+    StructuredBuffer<float4> capsuleB;        // [numLinks]
+    StructuredBuffer<float> medianRadius;     // [numLinks] radius of the median-radius capsule (validator's)
+    StructuredBuffer<float> linkGroundContact; // [frame * numLinks] equality weight (0: barrier only)
+    StructuredBuffer<int2> collisionPairs;    // [numPairs]
+    StructuredBuffer<int2> linkPointRange;    // [numLinks] (first, count) into linkPoints
+    StructuredBuffer<float4> linkPoints;      // surface points, link frame
+    StructuredBuffer<uint2> colTargets;       // [6 + numDofs] targets whose position (x) / rotation (y) rows are
+    StructuredBuffer<int> dofLink;            // [numDofs] link of each joint
+    StructuredBuffer<uint> linkDepth;         // [numLinks] depth in the kinematic tree (root 0)
+    uint maxDepth;
+    StructuredBuffer<float4> linkBound;       // [numLinks] bounding sphere of the points (link frame, w = radius)
+    StructuredBuffer<float4> linkCom;         // [numLinks] link-frame CoM, w = mass
+    StructuredBuffer<uint2> linkAncestors;    // [numLinks] bit l set: link l is the link or an ancestor
+    RWStructuredBuffer<float4> trajLinkCom;   // [frame * numLinks] world link CoMs of the current iterate
+    StructuredBuffer<float4> contactPoint;    // [frame * CONTACT_POINTS] world, w = link + 1 (0: inactive)
+    StructuredBuffer<float> frameFps;         // [frame]
+    RWStructuredBuffer<float4> trajSole;      // [frame * 8] world sole points of the result (when writeFeatures)
+    RWStructuredBuffer<float4> trajPatch;     // [frame * CONTACT_POINTS] ground contact patches (x, y, 0, link + 1)
+    uint writeFeatures;                       // 1: write trajSole / trajPatch (the sweep before an anchor refresh)
+    RWStructuredBuffer<float> contactLambda;  // [frame * CONTACT_POINTS * 4] friction-edge coefficients of the
+    uint numFrameList;
+    uint numPairs;
+    uint numHandPairs;
+    StructuredBuffer<int2> handPairs;         // [numHandPairs] (left-hand link, right-hand link)
+    StructuredBuffer<int4> linkSegment;       // [numLinks] limb links and pelvis: the human segment (two
+    StructuredBuffer<int> armTargets;         // [6] shoulder, elbow, hand position targets, left then right (-1: none)
+    uint sweepIterations;
+    float velocityWeight;
+    float accelerationWeight;
+    float rootVelocityWeight;
+    float groundWeight;
+    float groundMargin;
+    float collisionWeight;
+    float collisionMargin;
+    float collisionBand;     // smooth onset of the collision push over this distance before the margin
+    float constraintScale;   // continuation: ramps the lock / ground / contact / collision weights up
+    float rootAccelerationWeight;
+    float referenceWeight;       // joints (rad) and root rotation
+    float referenceRootWeight;   // root position (m)
+    StructuredBuffer<float4> referenceRootPos;   // [frame]
+    StructuredBuffer<float4> referenceRootRot;   // [frame]
+    StructuredBuffer<float> referenceQ;          // [frame * numDofs]
+    float dynamicsWeight;
+    float friction;
+    float totalMass;
+    uint contactIterations;
+    uint dynamicsStride;    // K: dynamics accelerations use frames t ± K (frames are coloured mod 2K + 1)
+    uint forceFree;         // 1: force-free CoM support terms instead of the contact-force solve
+    int2 smoothLinks;       // links whose position acceleration is penalised (hands), -1: none
+    float linkAccelerationWeight;
+    float accelerationLimitWeight;           // 0: off
+    StructuredBuffer<float> accelerationLimit;   // [frame * numDofs] rad/s² (already scaled by the margin)
+    float maxJointStep;     // rad per step
+    float maxRootStep;      // m per step
+    StructuredBuffer<int2> windowFrames;    // [numWindows] (first, end) frames solved, global indices
+    uint numWindows;
+    uint windowSweeps;
+};
+#ifdef __METAL__
+ParameterBlock<OfflineParams> ofl;
+#else
+uniform OfflineParams ofl;
+#endif
 
-uniform StructuredBuffer<int> linkChainStart;     // [numLinks] into linkChainLinks
-uniform StructuredBuffer<int> linkChainCount;
-uniform StructuredBuffer<int> linkChainLinks;     // actuated ancestors (incl. self) of every link
 
-uniform StructuredBuffer<int> soleLink;           // [2]
-uniform StructuredBuffer<float4> solePoint;       // [8] link-frame sole points (foot k: 4k..4k+3)
-uniform StructuredBuffer<float4> soleAnchor;      // [frame * 8] (x, y, vertical weight factor, weight); target
                                                   // height 0 (the ground); weight 0: not locked
 
-uniform StructuredBuffer<float4> capsuleA;        // [numLinks] link frame, w = radius (0: no capsule)
-uniform StructuredBuffer<float4> capsuleB;        // [numLinks]
-uniform StructuredBuffer<float> medianRadius;     // [numLinks] radius of the median-radius capsule (validator's)
 
 /// Required distance between the capsule axes of links a and b: the validator flags a link's surface points inside
 /// the other link's median-radius capsule, so the axes must stay apart by the larger of (a's enclosing radius + b's
@@ -72,71 +137,19 @@ uniform StructuredBuffer<float> medianRadius;     // [numLinks] radius of the me
 /// boxy G1 torso, whose enclosing radius is 11.7 cm against 7.1 cm median, where the person's hands touch it.)
 float requiredDistance(int a, int b)
 {
-    return max(capsuleA[a].w + medianRadius[b], medianRadius[a] + capsuleA[b].w);
+    return max(ofl.capsuleA[a].w + ofl.medianRadius[b], ofl.medianRadius[a] + ofl.capsuleA[b].w);
 }
-uniform StructuredBuffer<float> linkGroundContact; // [frame * numLinks] equality weight (0: barrier only)
-uniform StructuredBuffer<int2> collisionPairs;    // [numPairs]
-uniform StructuredBuffer<int2> linkPointRange;    // [numLinks] (first, count) into linkPoints
-uniform StructuredBuffer<float4> linkPoints;      // surface points, link frame
-uniform StructuredBuffer<uint2> colTargets;       // [6 + numDofs] targets whose position (x) / rotation (y) rows are
                                                   // nonzero in the column (bit t; zero-weight parts excluded)
-uniform StructuredBuffer<int> dofLink;            // [numDofs] link of each joint
-uniform StructuredBuffer<uint> linkDepth;         // [numLinks] depth in the kinematic tree (root 0)
-uniform uint maxDepth;
-uniform StructuredBuffer<float4> linkBound;       // [numLinks] bounding sphere of the points (link frame, w = radius)
 
-uniform StructuredBuffer<float4> linkCom;         // [numLinks] link-frame CoM, w = mass
-uniform StructuredBuffer<uint2> linkAncestors;    // [numLinks] bit l set: link l is the link or an ancestor
-uniform RWStructuredBuffer<float4> trajLinkCom;   // [frame * numLinks] world link CoMs of the current iterate
-uniform StructuredBuffer<float4> contactPoint;    // [frame * CONTACT_POINTS] world, w = link + 1 (0: inactive)
-uniform StructuredBuffer<float> frameFps;         // [frame]
-uniform RWStructuredBuffer<float4> trajSole;      // [frame * 8] world sole points of the result (when writeFeatures)
-uniform RWStructuredBuffer<float4> trajPatch;     // [frame * CONTACT_POINTS] ground contact patches (x, y, 0, link + 1)
                                                   // of the links in mapped contact, in link order; w = 0: none
-uniform uint writeFeatures;                       // 1: write trajSole / trajPatch (the sweep before an anchor refresh)
-uniform RWStructuredBuffer<float> contactLambda;  // [frame * CONTACT_POINTS * 4] friction-edge coefficients of the
                                                   // frame's contact-force solve, warm start for the next one
 
-uniform uint numFrameList;
-uniform uint numPairs;
-uniform uint numHandPairs;
-uniform StructuredBuffer<int2> handPairs;         // [numHandPairs] (left-hand link, right-hand link)
-uniform StructuredBuffer<int4> linkSegment;       // [numLinks] limb links and pelvis: the human segment (two
                                                   // position targets) they stand for, -1: none; z: 1 arm, 0 body
-uniform StructuredBuffer<int> armTargets;         // [6] shoulder, elbow, hand position targets, left then right (-1: none)
-uniform uint sweepIterations;
-uniform float velocityWeight;
-uniform float accelerationWeight;
-uniform float rootVelocityWeight;
-uniform float groundWeight;
-uniform float groundMargin;
-uniform float collisionWeight;
-uniform float collisionMargin;
-uniform float collisionBand;     // smooth onset of the collision push over this distance before the margin
-uniform float constraintScale;   // continuation: ramps the lock / ground / contact / collision weights up
-uniform float rootAccelerationWeight;
 // Fixed-lag windows: a prior pulling each frame to a reference pose (its realtime solve), so errors along directions
 // nothing else holds (the arms' null space, the root under the dynamics term) cannot accumulate from frame to frame.
 // Weights 0 (batch): off.
-uniform float referenceWeight;       // joints (rad) and root rotation
-uniform float referenceRootWeight;   // root position (m)
-uniform StructuredBuffer<float4> referenceRootPos;   // [frame]
-uniform StructuredBuffer<float4> referenceRootRot;   // [frame]
-uniform StructuredBuffer<float> referenceQ;          // [frame * numDofs]
-uniform float dynamicsWeight;
-uniform float friction;
-uniform float totalMass;
-uniform uint contactIterations;
-uniform uint dynamicsStride;    // K: dynamics accelerations use frames t ± K (frames are coloured mod 2K + 1)
-uniform uint forceFree;         // 1: force-free CoM support terms instead of the contact-force solve
-uniform int2 smoothLinks;       // links whose position acceleration is penalised (hands), -1: none
-uniform float linkAccelerationWeight;
 // Joint acceleration limits: a one-sided penalty on the second differences over frames s ± K (the validator's band)
 // that exceed the effort-limited acceleration at the frame's warm-start pose, residual (|a| / limit - 1) per joint.
-uniform float accelerationLimitWeight;           // 0: off
-uniform StructuredBuffer<float> accelerationLimit;   // [frame * numDofs] rad/s² (already scaled by the margin)
-uniform float maxJointStep;     // rad per step
-uniform float maxRootStep;      // m per step
 
 groupshared float oJ[O_MAX_ROWS * O_MAX_VARS];
 groupshared float oR[O_MAX_ROWS];
@@ -178,35 +191,35 @@ groupshared uint dValid[3];
 /// Forward kinematics of the current pose, one tree level at a time (the links of a level in parallel).
 void forwardOffline(uint lane)
 {
-    for (uint i = lane; i < numLinks; i += O_GROUP)
+    for (uint i = lane; i < ik.numLinks; i += O_GROUP)
     {
-        if (linkParent[i] < 0)
+        if (ik.linkParent[i] < 0)
         {
             oRot[i] = oRootRot;
             oPos[i] = oRootPos;
         }
     }
     GroupMemoryBarrierWithGroupSync();
-    for (uint level = 1; level <= maxDepth; level++)
+    for (uint level = 1; level <= ofl.maxDepth; level++)
     {
-        for (uint i = lane; i < numLinks; i += O_GROUP)
+        for (uint i = lane; i < ik.numLinks; i += O_GROUP)
         {
-            if (linkDepth[i] != level)
+            if (ofl.linkDepth[i] != level)
                 continue;
-            int parent = linkParent[i];
+            int parent = ik.linkParent[i];
             float4 r = oRot[parent];
-            float3 p = oPos[parent] + qrotate(r, jointOriginPos[i].xyz);
-            r = qmul(r, jointOriginRot[i]);
-            int dof = linkDof[i];
+            float3 p = oPos[parent] + qrotate(r, ik.jointOriginPos[i].xyz);
+            r = qmul(r, ik.jointOriginRot[i]);
+            int dof = ik.linkDof[i];
             if (dof >= 0)
             {
-                float3 a = jointAxis[i].xyz;
+                float3 a = ik.jointAxis[i].xyz;
                 oAxis[i] = qrotate(r, a);
                 oOrigin[i] = p;
                 r = qmul(r, qaxisAngle(a, oQ[dof]));
             }
-            oPos[i] = p + qrotate(r, jointToChildPos[i].xyz);
-            oRot[i] = normalize(qmul(r, jointToChildRot[i]));
+            oPos[i] = p + qrotate(r, ik.jointToChildPos[i].xyz);
+            oRot[i] = normalize(qmul(r, ik.jointToChildRot[i]));
         }
         GroupMemoryBarrierWithGroupSync();
     }
@@ -231,24 +244,24 @@ void clearRow(uint row, uint nv)
 /// (3 rows), rotation rows likewise; only for columns the target's rows reach (colTargets).
 float3 targetPosJ(uint t, uint a)
 {
-    float w = targetWeight[t].x;
-    float3 p = oPos[targetLink[t]];
+    float w = ik.targetWeight[t].x;
+    float3 p = oPos[ik.targetLink[t]];
     if (a < 3)
         return float3(a == 0 ? w : 0, a == 1 ? w : 0, a == 2 ? w : 0);
     if (a < 6)
         return w * cross(float3(a == 3 ? 1 : 0, a == 4 ? 1 : 0, a == 5 ? 1 : 0), p - oRootPos);
-    int l = dofLink[a - 6];
+    int l = ofl.dofLink[a - 6];
     return w * cross(oAxis[l], p - oOrigin[l]);
 }
 
 float3 targetRotJ(uint t, uint a)
 {
-    float w = targetWeight[t].y;
-    float4 twist = targetTwist[t];
-    float3 axis = qrotate(oRot[targetLink[t]], twist.xyz);
+    float w = ik.targetWeight[t].y;
+    float4 twist = ik.targetTwist[t];
+    float3 axis = qrotate(oRot[ik.targetLink[t]], twist.xyz);
     if (a < 6)
         return untwist(float3(a == 3 ? w : 0, a == 4 ? w : 0, a == 5 ? w : 0), axis, twist.w);
-    return untwist(w * oAxis[dofLink[a - 6]], axis, twist.w);
+    return untwist(w * oAxis[ofl.dofLink[a - 6]], axis, twist.w);
 }
 
 /// Writes (or with `add`, adds) w * dir · dP/dx for the world point P fixed on `link` into a residual row, and
@@ -262,11 +275,11 @@ void pointRow(uint row, int link, float3 P, float3 dir, float w, bool add)
         oJ[row * O_MAX_VARS + c] = add ? oJ[row * O_MAX_VARS + c] + root[c] : root[c];
         markRow(row, c);
     }
-    uint c0 = uint(linkChainStart[link]), cn = uint(linkChainCount[link]);
+    uint c0 = uint(ofl.linkChainStart[link]), cn = uint(ofl.linkChainCount[link]);
     for (uint c = 0; c < cn; c++)
     {
-        int l = linkChainLinks[c0 + c];
-        uint col = 6 + uint(linkDof[l]);
+        int l = ofl.linkChainLinks[c0 + c];
+        uint col = 6 + uint(ik.linkDof[l]);
         float v = w * dot(dir, cross(oAxis[l], P - oOrigin[l]));
         oJ[row * O_MAX_VARS + col] = add ? oJ[row * O_MAX_VARS + col] + v : v;
         markRow(row, col);
@@ -293,7 +306,7 @@ float2 collisionBarrier(float g, float band, float w)
     return float2(w * (0.5 * band - g), -w);
 }
 
-float3 storedCom(uint frame, uint link) { return trajLinkCom[frame * numLinks + link].xyz; }
+float3 storedCom(uint frame, uint link) { return ofl.trajLinkCom[frame * ik.numLinks + link].xyz; }
 
 /// Closest points of two segments (Ericson): returns (s, t).
 float2 segmentParameters(float3 p1, float3 q1, float3 p2, float3 q2)
@@ -329,13 +342,13 @@ float2 segmentParameters(float3 p1, float3 q1, float3 p2, float3 q2)
 /// valid slot's gravito-inertial wrench (a slot needs both neighbours s ± K inside the clip).
 void dynamicsKinematics(uint frame, int2 range, uint lane)
 {
-    int f = int(frame), K = int(dynamicsStride);
-    float rate = frameFps[frame] / float(K);
+    int f = int(frame), K = int(ofl.dynamicsStride);
+    float rate = ofl.frameFps[frame] / float(K);
     float fps2 = rate * rate;
     bool hasM1 = f - K >= range.x, hasP1 = f + K < range.y;
-    for (uint i = lane; i < numLinks; i += O_GROUP)
+    for (uint i = lane; i < ik.numLinks; i += O_GROUP)
     {
-        float3 live = oPos[i] + qrotate(oRot[i], linkCom[i].xyz);
+        float3 live = oPos[i] + qrotate(oRot[i], ofl.linkCom[i].xyz);
         float3 cm1 = hasM1 ? storedCom(uint(f - K), i) : live, cp1 = hasP1 ? storedCom(uint(f + K), i) : live;
         dC[i] = cm1;
         dC[MAX_LINKS + i] = live;
@@ -349,14 +362,14 @@ void dynamicsKinematics(uint frame, int2 range, uint lane)
         bool valid = s - K >= range.x && s + K < range.y;
         dValid[lane] = valid ? 1 : 0;
         float3 com = float3(0, 0, 0);
-        for (uint i = 0; i < numLinks; i++)
-            com += linkCom[i].w * dC[lane * MAX_LINKS + i];
-        com /= totalMass;
+        for (uint i = 0; i < ik.numLinks; i++)
+            com += ofl.linkCom[i].w * dC[lane * MAX_LINKS + i];
+        com /= ofl.totalMass;
         dCom[lane] = com;
         float3 F = float3(0, 0, 0), N = float3(0, 0, 0);
         if (valid)
         {
-            for (uint i = 0; i < numLinks; i++)
+            for (uint i = 0; i < ik.numLinks; i++)
             {
                 float3 a;
                 if (lane == 1)
@@ -365,7 +378,7 @@ void dynamicsKinematics(uint frame, int2 range, uint lane)
                     a = (dC[MAX_LINKS + i] - 2.0 * dC[i] + storedCom(uint(f - 2 * K), i)) * fps2 - GRAVITY;
                 else                // s = t+K: c(t), c(t+K), c(t+2K)
                     a = (storedCom(uint(f + 2 * K), i) - 2.0 * dC[2 * MAX_LINKS + i] + dC[MAX_LINKS + i]) * fps2 - GRAVITY;
-                a *= linkCom[i].w;
+                a *= ofl.linkCom[i].w;
                 F += a;
                 N += cross(dC[lane * MAX_LINKS + i] - com, a);
             }
@@ -379,7 +392,7 @@ void dynamicsKinematics(uint frame, int2 range, uint lane)
 float3 frictionEdge(uint e)
 {
     float2 t = e == 0 ? float2(1, 0) : (e == 1 ? float2(0, 1) : (e == 2 ? float2(-1, 0) : float2(0, -1)));
-    return normalize(float3(friction * t, 1.0));
+    return normalize(float3(ofl.friction * t, 1.0));
 }
 
 /// Residual wrench of slot k after the best non-negative contact forces (one lane per slot).
@@ -391,7 +404,7 @@ float3 supportDistance(uint s, float2 p)
     uint count = 0;
     for (uint c = 0; c < CONTACT_POINTS; c++)
     {
-        float4 q = contactPoint[s * CONTACT_POINTS + c];
+        float4 q = ofl.contactPoint[s * CONTACT_POINTS + c];
         if (q.w > 0.0)
             pts[count++] = q.xy;
     }
@@ -466,7 +479,7 @@ float3 supportDistance(uint s, float2 p)
 
 void dynamicsResidual(uint frame, uint k)
 {
-    float w = dynamicsWeight * constraintScale;
+    float w = ofl.dynamicsWeight * ofl.constraintScale;
     for (uint r = 0; r < 6; r++)
     {
         dCoefF[k * 6 + r] = float3(0, 0, 0);
@@ -480,8 +493,8 @@ void dynamicsResidual(uint frame, uint k)
         dResForce[k] = float3(0, 0, 0);
         return;
     }
-    uint s = uint(int(frame) + (int(k) - 1) * int(dynamicsStride));
-    float mg = totalMass * 9.81;
+    uint s = uint(int(frame) + (int(k) - 1) * int(ofl.dynamicsStride));
+    float mg = ofl.totalMass * 9.81;
     float3 com = dCom[k];
     // Wrench rows (contact-force solve, or flight in either mode): residual F / mg, N / (mg l).
     for (uint r = 0; r < 3; r++)
@@ -492,8 +505,8 @@ void dynamicsResidual(uint frame, uint k)
     }
     bool anyContact = false;
     for (uint c = 0; c < CONTACT_POINTS; c++)
-        anyContact = anyContact || contactPoint[s * CONTACT_POINTS + c].w > 0.0;
-    if (forceFree != 0 && anyContact)
+        anyContact = anyContact || ofl.contactPoint[s * CONTACT_POINTS + c].w > 0.0;
+    if (ofl.forceFree != 0 && anyContact)
     {
         // Force-free CoM support: the ground cannot pull (F_z >= 0), the total horizontal force stays inside the
         // friction cone, and the ZMP of the motion stays inside the support polygon of the contact points. ZMP on z = 0 from the wrench about the CoM:
@@ -513,10 +526,10 @@ void dynamicsResidual(uint frame, uint k)
         // Friction on the total ground force: |F_xy| <= mu F_z (otherwise horizontal acceleration can put the
         // ZMP anywhere).
         float fh = length(F.xy);
-        if (fh > friction * max(F.z, 0.0) && fh > 1e-6)
+        if (fh > ofl.friction * max(F.z, 0.0) && fh > 1e-6)
         {
-            dRes[k * 6 + 2] = w * (fh - friction * max(F.z, 0.0)) / mg;
-            dCoefF[k * 6 + 2] = w * float3(F.x / fh, F.y / fh, F.z > 0.0 ? -friction : 0.0) / mg;
+            dRes[k * 6 + 2] = w * (fh - ofl.friction * max(F.z, 0.0)) / mg;
+            dCoefF[k * 6 + 2] = w * float3(F.x / fh, F.y / fh, F.z > 0.0 ? -ofl.friction : 0.0) / mg;
         }
         // ZMP row only for frame t's own slot: from the neighbours' slots (t ± K, which frame t reaches only
         // through second-difference accelerations) it diverged.
@@ -558,14 +571,14 @@ void dynamicsResidual(uint frame, uint k)
     uint count = 0;
     for (uint c = 0; c < CONTACT_POINTS; c++)
     {
-        float4 p = contactPoint[s * CONTACT_POINTS + c];
+        float4 p = ofl.contactPoint[s * CONTACT_POINTS + c];
         if (p.w <= 0.0)
             continue;
         active[count] = c;
         arm[count] = (p.xyz - com) / MOMENT_SCALE;
         for (uint e = 0; e < 4; e++)
         {
-            float l = contactLambda[(s * CONTACT_POINTS + c) * 4 + e];
+            float l = ofl.contactLambda[(s * CONTACT_POINTS + c) * 4 + e];
             lambda[count * 4 + e] = l;
             if (l > 0.0)
             {
@@ -575,7 +588,7 @@ void dynamicsResidual(uint frame, uint k)
         }
         count++;
     }
-    for (uint it = 0; it < contactIterations; it++)
+    for (uint it = 0; it < ofl.contactIterations; it++)
     {
         for (uint a = 0; a < count; a++)
         {
@@ -595,10 +608,10 @@ void dynamicsResidual(uint frame, uint k)
         }
     }
     for (uint c = 0; c < CONTACT_POINTS * 4; c++)
-        contactLambda[s * CONTACT_POINTS * 4 + c] = 0.0;
+        ofl.contactLambda[s * CONTACT_POINTS * 4 + c] = 0.0;
     for (uint a = 0; a < count; a++)
         for (uint e = 0; e < 4; e++)
-            contactLambda[(s * CONTACT_POINTS + active[a]) * 4 + e] = lambda[a * 4 + e];
+            ofl.contactLambda[(s * CONTACT_POINTS + active[a]) * 4 + e] = lambda[a * 4 + e];
     for (uint r = 0; r < 3; r++)
     {
         dRes[k * 6 + r] = w * rf[r];
@@ -609,7 +622,7 @@ void dynamicsResidual(uint frame, uint k)
 
 bool isAncestor(uint ancestor, uint link)
 {
-    uint2 mask = linkAncestors[link];
+    uint2 mask = ofl.linkAncestors[link];
     return ancestor < 32 ? ((mask.x >> ancestor) & 1) != 0 : ((mask.y >> (ancestor - 32)) & 1) != 0;
 }
 
@@ -619,9 +632,9 @@ void buildDynamicsRows(uint frame, uint lane, uint nv, uint row0)
     if (lane < 3)
         dynamicsResidual(frame, lane);
     GroupMemoryBarrierWithGroupSync();
-    float fps = frameFps[frame] / float(dynamicsStride);
-    float w = dynamicsWeight * constraintScale;
-    float mg = totalMass * 9.81;
+    float fps = ofl.frameFps[frame] / float(ofl.dynamicsStride);
+    float w = ofl.dynamicsWeight * ofl.constraintScale;
+    float mg = ofl.totalMass * 9.81;
     for (uint col = lane; col < nv; col += O_GROUP)
     {
         float3 jF[3], jN[3];
@@ -630,16 +643,16 @@ void buildDynamicsRows(uint frame, uint lane, uint nv, uint row0)
             jF[k] = float3(0, 0, 0);
             jN[k] = float3(0, 0, 0);
         }
-        int dofLink = -1;
+        int colLink = -1;
         if (col >= 6)
         {
-            for (uint l = 0; l < numLinks; l++)
-                if (linkDof[l] == int(col) - 6)
-                    dofLink = int(l);
+            for (uint l = 0; l < ik.numLinks; l++)
+                if (ik.linkDof[l] == int(col) - 6)
+                    colLink = int(l);
         }
-        for (uint i = 0; i < numLinks; i++)
+        for (uint i = 0; i < ik.numLinks; i++)
         {
-            float m = linkCom[i].w;
+            float m = ofl.linkCom[i].w;
             if (m <= 0.0)
                 continue;
             float3 ct = dC[MAX_LINKS + i];
@@ -650,9 +663,9 @@ void buildDynamicsRows(uint frame, uint lane, uint nv, uint row0)
                 J = cross(float3(col == 3 ? 1 : 0, col == 4 ? 1 : 0, col == 5 ? 1 : 0), ct - oRootPos);
             else
             {
-                if (!isAncestor(uint(dofLink), i))
+                if (!isAncestor(uint(colLink), i))
                     continue;
-                J = cross(oAxis[dofLink], ct - oOrigin[dofLink]);
+                J = cross(oAxis[colLink], ct - oOrigin[colLink]);
             }
             for (uint k = 0; k < 3; k++)
             {
@@ -666,7 +679,7 @@ void buildDynamicsRows(uint frame, uint lane, uint nv, uint row0)
         }
         // Frame t's moment reference is its own CoM: moving it shifts the residual moment by -dc x F_residual
         // (force-free mode: the whole F, see dynamicsResidual).
-        float3 jCom = jF[1] / (-2.0 * fps * fps * totalMass);
+        float3 jCom = jF[1] / (-2.0 * fps * fps * ofl.totalMass);
         jN[1] -= cross(jCom, dResForce[1] * mg);
         for (uint k = 0; k < 3; k++)
         {
@@ -698,11 +711,11 @@ void buildSmoothRows(uint frame, int2 range, uint lane, uint nv, uint row0)
     if (lane >= SMOOTH_LINKS * 3)
         return;
     uint li = lane / 3, k = lane % 3;    // link slot, frame slot (s = t - 1 + k)
-    int link = li == 0 ? smoothLinks.x : smoothLinks.y;
+    int link = li == 0 ? ofl.smoothLinks.x : ofl.smoothLinks.y;
     int f = int(frame), sframe = f - 1 + int(k);
-    if (link < 0 || sframe - 1 < range.x || sframe + 1 >= range.y || linkAccelerationWeight <= 0.0)
+    if (link < 0 || sframe - 1 < range.x || sframe + 1 >= range.y || ofl.linkAccelerationWeight <= 0.0)
         return;
-    float3 live = oPos[link] + qrotate(oRot[link], linkCom[link].xyz);
+    float3 live = oPos[link] + qrotate(oRot[link], ofl.linkCom[link].xyz);
     float3 c[5];
     for (int d = -2; d <= 2; d++)
     {
@@ -711,7 +724,7 @@ void buildSmoothRows(uint frame, int2 range, uint lane, uint nv, uint row0)
     }
     float3 a = c[k + 2] - 2.0 * c[k + 1] + c[k];
     float coef = k == 1 ? -2.0 : 1.0;
-    float w = linkAccelerationWeight;
+    float w = ofl.linkAccelerationWeight;
     for (uint axis = 0; axis < 3; axis++)
     {
         uint row = row0 + li * 9 + k * 3 + axis;
@@ -729,13 +742,13 @@ bool collisionPairRow(uint p, uint frame, out int2 pair, out float3 ca, out floa
     cb = float3(0, 0, 0);
     n = float3(0, 0, 0);
     barrier = float2(0, 0);
-    pair = collisionPairs[p];
-    float4 a0 = capsuleA[pair.x], a1 = capsuleB[pair.x], b0 = capsuleA[pair.y], b1 = capsuleB[pair.y];
+    pair = ofl.collisionPairs[p];
+    float4 a0 = ofl.capsuleA[pair.x], a1 = ofl.capsuleB[pair.x], b0 = ofl.capsuleA[pair.y], b1 = ofl.capsuleB[pair.y];
     // Bounding spheres of the two capsules apart by more than the band (the required distance is at most
     // the sum of the enclosing radii): no row.
     float reach = 0.5 * (length(a1.xyz - a0.xyz) + length(b1.xyz - b0.xyz)) + a0.w + b0.w;
     float3 centreA = worldPoint(pair.x, 0.5 * (a0.xyz + a1.xyz)), centreB = worldPoint(pair.y, 0.5 * (b0.xyz + b1.xyz));
-    if (length(centreA - centreB) - reach - collisionMargin >= collisionBand)
+    if (length(centreA - centreB) - reach - ofl.collisionMargin >= ofl.collisionBand)
         return false;
     float3 pa0 = worldPoint(pair.x, a0.xyz), pa1 = worldPoint(pair.x, a1.xyz);
     float3 pb0 = worldPoint(pair.y, b0.xyz), pb1 = worldPoint(pair.y, b1.xyz);
@@ -743,7 +756,7 @@ bool collisionPairRow(uint p, uint frame, out int2 pair, out float3 ca, out floa
     ca = lerp(pa0, pa1, st.x);
     cb = lerp(pb0, pb1, st.y);
     float d = length(ca - cb);
-    float gap = d - (requiredDistance(pair.x, pair.y) + collisionMargin);
+    float gap = d - (requiredDistance(pair.x, pair.y) + ofl.collisionMargin);
     // Separation direction: between the closest points, oriented from b's centre towards a's so it cannot
     // flip as the segments pass each other; at an actual crossing (d ~ 0) the centre-to-centre direction.
     float3 centres = 0.5 * (pa0 + pa1) - 0.5 * (pb0 + pb1);
@@ -763,12 +776,12 @@ bool collisionPairRow(uint p, uint frame, out int2 pair, out float3 ca, out floa
     // An arm against the pelvis or a leg: the person's direction blended 2:1 with the robot's own (a hand
     // sliding down past the wider robot hip swung from its front to its side within a few frames; the person's
     // direction alone left the hand up to 1.4 cm inside the hip, where the robot's hip is in its way).
-    int4 sa = linkSegment[pair.x], sb = linkSegment[pair.y];
+    int4 sa = ofl.linkSegment[pair.x], sb = ofl.linkSegment[pair.y];
     if (sa.x >= 0 && sb.x >= 0 && (sa.z == 1 || sb.z == 1))
     {
-        uint base = frame * numTargets;
-        float3 a0g = goalPos[base + uint(sa.x)].xyz, a1g = goalPos[base + uint(sa.y)].xyz;
-        float3 b0g = goalPos[base + uint(sb.x)].xyz, b1g = goalPos[base + uint(sb.y)].xyz;
+        uint base = frame * ik.numTargets;
+        float3 a0g = ik.goalPos[base + uint(sa.x)].xyz, a1g = ik.goalPos[base + uint(sa.y)].xyz;
+        float3 b0g = ik.goalPos[base + uint(sb.x)].xyz, b1g = ik.goalPos[base + uint(sb.y)].xyz;
         float2 hs = segmentParameters(a0g, a1g, b0g, b1g);
         float3 h = lerp(a0g, a1g, hs.x) - lerp(b0g, b1g, hs.y);
         if (length(h) > 0.01)
@@ -780,7 +793,7 @@ bool collisionPairRow(uint p, uint frame, out int2 pair, out float3 ca, out floa
                 n = normalize(2.0 * h + n);
         }
     }
-    barrier = collisionBarrier(gap, collisionBand, collisionWeight * constraintScale);
+    barrier = collisionBarrier(gap, ofl.collisionBand, ofl.collisionWeight * ofl.constraintScale);
     return barrier.x > 0.0;
 }
 
@@ -788,16 +801,16 @@ void buildRows(uint frame, uint lane, uint nv, bool features)
 {
     uint rowSole = 0;
     uint rowGround = rowSole + 3 * SOLE_POINTS;
-    uint rowPairs = rowGround + numLinks;
+    uint rowPairs = rowGround + ik.numLinks;
 
     // Tracking targets: weighted residuals only (6 per target).
-    for (uint t = lane; t < numTargets; t += O_GROUP)
+    for (uint t = lane; t < ik.numTargets; t += O_GROUP)
     {
-        int link = targetLink[t];
-        float2 w = targetWeight[t];
-        float3 rp = w.x * (oPos[link] - goalPos[frame * numTargets + t].xyz);
-        float4 twist = targetTwist[t];
-        float3 rr = untwist(w.y * qlog(qmul(oRot[link], qconj(goalRot[frame * numTargets + t]))), qrotate(oRot[link], twist.xyz), twist.w);
+        int link = ik.targetLink[t];
+        float2 w = ik.targetWeight[t];
+        float3 rp = w.x * (oPos[link] - ik.goalPos[frame * ik.numTargets + t].xyz);
+        float4 twist = ik.targetTwist[t];
+        float3 rr = untwist(w.y * qlog(qmul(oRot[link], qconj(ik.goalRot[frame * ik.numTargets + t]))), qrotate(oRot[link], twist.xyz), twist.w);
         for (uint k = 0; k < 3; k++)
         {
             oTR[6 * t + k] = rp[k];
@@ -808,10 +821,10 @@ void buildRows(uint frame, uint lane, uint nv, bool features)
     // Sole points: lock to the stance anchor, else keep above the ground.
     for (uint i = lane; i < SOLE_POINTS; i += O_GROUP)
     {
-        int link = soleLink[i / 4];
-        float3 P = worldPoint(link, solePoint[i].xyz);
-        float4 anchor = soleAnchor[frame * SOLE_POINTS + i];
-        anchor.w *= constraintScale;
+        int link = ofl.soleLink[i / 4];
+        float3 P = worldPoint(link, ofl.solePoint[i].xyz);
+        float4 anchor = ofl.soleAnchor[frame * SOLE_POINTS + i];
+        anchor.w *= ofl.constraintScale;
         for (uint k = 0; k < 3; k++)
         {
             uint row = rowSole + 3 * i + k;
@@ -825,30 +838,30 @@ void buildRows(uint frame, uint lane, uint nv, bool features)
                 setPointRow(row, link, P, dir, wk);
                 oR[row] = wk * (P[k] - target);
             }
-            else if (k == 2 && P.z < groundMargin)
+            else if (k == 2 && P.z < ofl.groundMargin)
             {
-                setPointRow(row, link, P, dir, groundWeight * constraintScale);
-                oR[row] = groundWeight * constraintScale * (P.z - groundMargin);
+                setPointRow(row, link, P, dir, ofl.groundWeight * ofl.constraintScale);
+                oR[row] = ofl.groundWeight * ofl.constraintScale * (P.z - ofl.groundMargin);
             }
         }
     }
 
     // Lowest surface point of every link: ground contact equality or barrier. A link whose bounding sphere stays
     // above the margin and that is not in contact has no row; the others' points are scanned by all lanes.
-    for (uint l = lane; l < numLinks; l += O_GROUP)
+    for (uint l = lane; l < ik.numLinks; l += O_GROUP)
     {
         oR[rowGround + l] = 0.0;
-        float4 bound = linkBound[l];
-        bool clear = bound.w > 0.0 && worldPoint(int(l), bound.xyz).z - bound.w >= groundMargin;
-        oScan[l] = linkPointRange[l].y > 0 && (!clear || linkGroundContact[frame * numLinks + l] > 0.0) ? 1 : 0;
+        float4 bound = ofl.linkBound[l];
+        bool clear = bound.w > 0.0 && worldPoint(int(l), bound.xyz).z - bound.w >= ofl.groundMargin;
+        oScan[l] = ofl.linkPointRange[l].y > 0 && (!clear || ofl.linkGroundContact[frame * ik.numLinks + l] > 0.0) ? 1 : 0;
     }
     GroupMemoryBarrierWithGroupSync();
     uint patchCount = 0;   // lane 0
-    for (uint l = 0; l < numLinks; l++)
+    for (uint l = 0; l < ik.numLinks; l++)
     {
         if (oScan[l] == 0)
             continue;
-        int2 range = linkPointRange[l];
+        int2 range = ofl.linkPointRange[l];
         // Height of a link-frame point: the third row of the link rotation.
         float4 r = oRot[l];
         float3 rowZ = float3(2.0 * (r.x * r.z - r.w * r.y), 2.0 * (r.y * r.z + r.w * r.x), 1.0 - 2.0 * (r.x * r.x + r.y * r.y));
@@ -856,7 +869,7 @@ void buildRows(uint frame, uint lane, uint nv, bool features)
         int bestIndex = 0;
         for (int k = int(lane); k < range.y; k += int(O_GROUP))
         {
-            float z = dot(rowZ, linkPoints[range.x + k].xyz);
+            float z = dot(rowZ, ofl.linkPoints[range.x + k].xyz);
             if (z < best)
             {
                 best = z;
@@ -877,10 +890,10 @@ void buildRows(uint frame, uint lane, uint nv, bool features)
                 }
             }
             uint row = rowGround + l;
-            float3 low = worldPoint(int(l), linkPoints[range.x + bestIndex].xyz);
+            float3 low = worldPoint(int(l), ofl.linkPoints[range.x + bestIndex].xyz);
             float z = low.z;
-            float contact = linkGroundContact[frame * numLinks + l] * constraintScale;
-            float wg = groundWeight * constraintScale;
+            float contact = ofl.linkGroundContact[frame * ik.numLinks + l] * ofl.constraintScale;
+            float wg = ofl.groundWeight * ofl.constraintScale;
             if (contact > 0.0)
             {
                 // Pulled to the ground; below it at least at the ground weight (the contact weight ramps in and
@@ -889,15 +902,15 @@ void buildRows(uint frame, uint lane, uint nv, bool features)
                 setPointRow(row, int(l), low, float3(0, 0, 1), w);
                 oR[row] = w * z;
             }
-            else if (z < groundMargin)
+            else if (z < ofl.groundMargin)
             {
                 setPointRow(row, int(l), low, float3(0, 0, 1), wg);
-                oR[row] = wg * (z - groundMargin);
+                oR[row] = wg * (z - ofl.groundMargin);
             }
             oMinZ[0] = z;
         }
         GroupMemoryBarrierWithGroupSync();
-        if (!features || linkGroundContact[frame * numLinks + l] <= 0.0)
+        if (!features || ofl.linkGroundContact[frame * ik.numLinks + l] <= 0.0)
             continue;
         // Contact patch (as the validator's contact model): among the points within 1 cm of the lowest, the
         // extreme ones along +x, -x, +y, -y. Lane l scans direction l % 4, every 8th point.
@@ -908,7 +921,7 @@ void buildRows(uint frame, uint lane, uint nv, bool features)
         int topIndex = -1;
         for (int k = int(lane / 4); k < range.y; k += int(O_GROUP / 4))
         {
-            float3 p = worldPoint(int(l), linkPoints[range.x + k].xyz);
+            float3 p = worldPoint(int(l), ofl.linkPoints[range.x + k].xyz);
             float score = dot(axis, p.xy);
             if (p.z < limit && score > top)
             {
@@ -941,8 +954,8 @@ void buildRows(uint frame, uint lane, uint nv, bool features)
                     repeated = repeated || chosen[e] == bestPoint;
                 if (!repeated && patchCount < CONTACT_POINTS)
                 {
-                    float3 p = worldPoint(int(l), linkPoints[range.x + bestPoint].xyz);
-                    trajPatch[frame * CONTACT_POINTS + patchCount] = float4(p.xy, 0.0, float(l + 1));
+                    float3 p = worldPoint(int(l), ofl.linkPoints[range.x + bestPoint].xyz);
+                    ofl.trajPatch[frame * CONTACT_POINTS + patchCount] = float4(p.xy, 0.0, float(l + 1));
                     patchCount++;
                 }
             }
@@ -951,9 +964,9 @@ void buildRows(uint frame, uint lane, uint nv, bool features)
     }
     if (features && lane == 0)
         for (uint k = patchCount; k < CONTACT_POINTS; k++)
-            trajPatch[frame * CONTACT_POINTS + k] = float4(0, 0, 0, 0);
+            ofl.trajPatch[frame * CONTACT_POINTS + k] = float4(0, 0, 0, 0);
     if (features && lane < SOLE_POINTS)
-        trajSole[frame * SOLE_POINTS + lane] = float4(worldPoint(soleLink[lane / 4], solePoint[lane].xyz), 0.0);
+        ofl.trajSole[frame * SOLE_POINTS + lane] = float4(worldPoint(ofl.soleLink[lane / 4], ofl.solePoint[lane].xyz), 0.0);
 
     // Self-collision: active capsule pairs claim rows in pair order (rows by an atomic counter came in thread
     // timing order: the sums of the normal equations, and which rows were dropped when they were full, changed from
@@ -966,13 +979,13 @@ void buildRows(uint frame, uint lane, uint nv, bool features)
         clearRow(rowPairs + k, nv);
     GroupMemoryBarrierWithGroupSync();
     uint pairRows = 0;
-    for (uint first = 0, round = 0; first < numPairs; first += O_GROUP, round = (round + 1) % 3)
+    for (uint first = 0, round = 0; first < ofl.numPairs; first += O_GROUP, round = (round + 1) % 3)
     {
         int2 pair = int2(0, 0);
         float3 ca = float3(0, 0, 0), cb = float3(0, 0, 0), n = float3(0, 0, 0);
         float2 barrier = float2(0, 0);
         bool active = false;
-        if (first + lane < numPairs)
+        if (first + lane < ofl.numPairs)
             active = collisionPairRow(first + lane, frame, pair, ca, cb, n, barrier);
         if (active)
             InterlockedOr(oPairMask[PAIR_WORDS * round + lane / 32], 1u << (lane % 32));
@@ -1008,20 +1021,20 @@ void buildRows(uint frame, uint lane, uint nv, bool features)
     // when they do. As separate pairs, each with its own closest-point direction (or with the robot's own hand
     // centres), clasped and rubbing hands were pushed one way, then another, and jumped above / below each other.
     GroupMemoryBarrierWithGroupSync();
-    if (lane == 0 && numHandPairs > 0)
+    if (lane == 0 && ofl.numHandPairs > 0)
     {
-        float worst = collisionBand;
+        float worst = ofl.collisionBand;
         int2 worstPair = int2(-1, -1);
         float3 wa = float3(0, 0, 0), wb = float3(0, 0, 0);
-        for (uint p = 0; p < numHandPairs; p++)
+        for (uint p = 0; p < ofl.numHandPairs; p++)
         {
-            int2 pair = handPairs[p];
-            float4 a0 = capsuleA[pair.x], a1 = capsuleB[pair.x], b0 = capsuleA[pair.y], b1 = capsuleB[pair.y];
+            int2 pair = ofl.handPairs[p];
+            float4 a0 = ofl.capsuleA[pair.x], a1 = ofl.capsuleB[pair.x], b0 = ofl.capsuleA[pair.y], b1 = ofl.capsuleB[pair.y];
             float3 pa0 = worldPoint(pair.x, a0.xyz), pa1 = worldPoint(pair.x, a1.xyz);
             float3 pb0 = worldPoint(pair.y, b0.xyz), pb1 = worldPoint(pair.y, b1.xyz);
             float2 st = segmentParameters(pa0, pa1, pb0, pb1);
             float3 ca = lerp(pa0, pa1, st.x), cb = lerp(pb0, pb1, st.y);
-            float gap = length(ca - cb) - (requiredDistance(pair.x, pair.y) + collisionMargin);
+            float gap = length(ca - cb) - (requiredDistance(pair.x, pair.y) + ofl.collisionMargin);
             if (gap < worst)
             {
                 worst = gap;
@@ -1031,15 +1044,15 @@ void buildRows(uint frame, uint lane, uint nv, bool features)
             }
         }
         // Direction: from the right hand's goal to the left's (the person's hands, scaled).
-        float3 c = armTargets[2] >= 0 && armTargets[5] >= 0
-            ? goalPos[frame * numTargets + uint(armTargets[2])].xyz - goalPos[frame * numTargets + uint(armTargets[5])].xyz
+        float3 c = ofl.armTargets[2] >= 0 && ofl.armTargets[5] >= 0
+            ? ik.goalPos[frame * ik.numTargets + uint(ofl.armTargets[2])].xyz - ik.goalPos[frame * ik.numTargets + uint(ofl.armTargets[5])].xyz
             : float3(0, 0, 0);
         if (worstPair.x >= 0 && length(c) > 1e-6 && oPairRows < O_MAX_PAIR_ROWS)
         {
             uint row = rowPairs + oPairRows;
             oPairRows += 1;
             float3 n = normalize(c);
-            float2 barrier = collisionBarrier(worst, collisionBand, collisionWeight * constraintScale);
+            float2 barrier = collisionBarrier(worst, ofl.collisionBand, ofl.collisionWeight * ofl.constraintScale);
             addPointRow(row, worstPair.x, wa, n, barrier.y);
             addPointRow(row, worstPair.y, wb, -n, barrier.y);
             oR[row] = barrier.x;
@@ -1053,34 +1066,34 @@ void buildRows(uint frame, uint lane, uint nv, bool features)
 /// stored link CoMs, and the cost is that of the pose before the update (the row pass is a fifth of a frame solve).
 void solveFrame(uint frame, uint lane, bool finalRows)
 {
-    int2 range = frameRange[frame];
-    uint n = numDofs;
+    int2 range = ofl.frameRange[frame];
+    uint n = ik.numDofs;
     uint nv = 6 + n;
-    uint rowDynamics = 3 * SOLE_POINTS + numLinks + O_MAX_PAIR_ROWS;
+    uint rowDynamics = 3 * SOLE_POINTS + ik.numLinks + O_MAX_PAIR_ROWS;
     uint rowSmooth = rowDynamics + DYN_ROWS;
 
     if (lane == 0)
     {
-        oRootPos = trajRootPos[frame].xyz;
-        oRootRot = trajRootRot[frame];
+        oRootPos = ofl.trajRootPos[frame].xyz;
+        oRootRot = ofl.trajRootRot[frame];
         for (uint j = 0; j < n; j++)
-            oQ[j] = trajQ[frame * n + j];
+            oQ[j] = ofl.trajQ[frame * n + j];
     }
     GroupMemoryBarrierWithGroupSync();
 
-    for (uint it = 0; it <= sweepIterations; it++)
+    for (uint it = 0; it <= ofl.sweepIterations; it++)
     {
         forwardOffline(lane);
-        if (it == sweepIterations && !finalRows)
+        if (it == ofl.sweepIterations && !finalRows)
             break;
         for (uint e = lane; e < nv * ROW_WORDS; e += O_GROUP)
             oRowBits[e] = 0;
         GroupMemoryBarrierWithGroupSync();
-        buildRows(frame, lane, nv, it == sweepIterations && writeFeatures != 0);
+        buildRows(frame, lane, nv, it == ofl.sweepIterations && ofl.writeFeatures != 0);
         GroupMemoryBarrierWithGroupSync();
-        if (it == sweepIterations)
+        if (it == ofl.sweepIterations)
             break;
-        if (dynamicsWeight > 0.0)   // weight 0 (fixed-lag windows): no CoM kinematics, no contact-force solve
+        if (ofl.dynamicsWeight > 0.0)   // weight 0 (fixed-lag windows): no CoM kinematics, no contact-force solve
         {
             dynamicsKinematics(frame, range, lane);
             buildDynamicsRows(frame, lane, nv, rowDynamics);
@@ -1109,7 +1122,7 @@ void solveFrame(uint frame, uint lane, bool finalRows)
                     sum += oJ[r * O_MAX_VARS + a] * oJ[r * O_MAX_VARS + b];
                 }
             }
-            uint2 both = colTargets[a] & colTargets[b];
+            uint2 both = ofl.colTargets[a] & ofl.colTargets[b];
             for (uint m = both.x; m != 0; m &= m - 1)
             {
                 uint t = firstbitlow(m);
@@ -1135,7 +1148,7 @@ void solveFrame(uint frame, uint lane, bool finalRows)
                     sum += oJ[r * O_MAX_VARS + a] * oR[r];
                 }
             }
-            uint2 targets = colTargets[a];
+            uint2 targets = ofl.colTargets[a];
             for (uint m = targets.x; m != 0; m &= m - 1)
             {
                 uint t = firstbitlow(m);
@@ -1153,55 +1166,55 @@ void solveFrame(uint frame, uint lane, bool finalRows)
         // Temporal coupling with the (fixed) neighbours, posture and limits — diagonal terms.
         int f = int(frame);
         bool m1 = f - 1 >= range.x, p1 = f + 1 < range.y, m2 = f - 2 >= range.x, p2 = f + 2 < range.y;
-        float wv = velocityWeight * velocityWeight, wa = accelerationWeight * accelerationWeight;
+        float wv = ofl.velocityWeight * ofl.velocityWeight, wa = ofl.accelerationWeight * ofl.accelerationWeight;
         for (uint j = lane; j < n; j += O_GROUP)
         {
             uint v = 6 + j;
             float q = oQ[j];
-            float qm1 = m1 ? trajQ[uint(f - 1) * n + j] : q, qp1 = p1 ? trajQ[uint(f + 1) * n + j] : q;
-            float qm2 = m2 ? trajQ[uint(f - 2) * n + j] : qm1, qp2 = p2 ? trajQ[uint(f + 2) * n + j] : qp1;
+            float qm1 = m1 ? ofl.trajQ[uint(f - 1) * n + j] : q, qp1 = p1 ? ofl.trajQ[uint(f + 1) * n + j] : q;
+            float qm2 = m2 ? ofl.trajQ[uint(f - 2) * n + j] : qm1, qp2 = p2 ? ofl.trajQ[uint(f + 2) * n + j] : qp1;
             float h = 0.0, gv = 0.0;
             if (m1) { h += wv; gv += wv * (q - qm1); }
             if (p1) { h += wv; gv += wv * (q - qp1); }
             if (m1 && m2) { h += wa; gv += wa * (q - 2.0 * qm1 + qm2); }
             if (m1 && p1) { h += 4.0 * wa; gv += -2.0 * wa * (qp1 - 2.0 * q + qm1); }
             if (p1 && p2) { h += wa; gv += wa * (qp2 - 2.0 * qp1 + q); }
-            if (accelerationLimitWeight > 0.0)
+            if (ofl.accelerationLimitWeight > 0.0)
             {
                 // Second differences centred at c = t - K, t, t + K (frame t's coefficient 1, -2, 1).
-                int K = int(dynamicsStride);
-                float dt2 = float(K * K) / (frameFps[frame] * frameFps[frame]);
+                int K = int(ofl.dynamicsStride);
+                float dt2 = float(K * K) / (ofl.frameFps[frame] * ofl.frameFps[frame]);
                 for (int k = -1; k <= 1; k++)
                 {
                     int c = f + k * K;
                     if (c - K < range.x || c + K >= range.y)
                         continue;
-                    float qa = c - K == f ? q : trajQ[uint(c - K) * n + j];
-                    float qc = c == f ? q : trajQ[uint(c) * n + j];
-                    float qb = c + K == f ? q : trajQ[uint(c + K) * n + j];
-                    float d = qb - 2.0 * qc + qa, dmax = accelerationLimit[uint(c) * n + j] * dt2;
+                    float qa = c - K == f ? q : ofl.trajQ[uint(c - K) * n + j];
+                    float qc = c == f ? q : ofl.trajQ[uint(c) * n + j];
+                    float qb = c + K == f ? q : ofl.trajQ[uint(c + K) * n + j];
+                    float d = qb - 2.0 * qc + qa, dmax = ofl.accelerationLimit[uint(c) * n + j] * dt2;
                     if (abs(d) <= dmax)
                         continue;
-                    float u = accelerationLimitWeight / dmax, coef = k == 0 ? -2.0 : 1.0;
+                    float u = ofl.accelerationLimitWeight / dmax, coef = k == 0 ? -2.0 : 1.0;
                     h += u * u * coef * coef;
                     gv += u * u * coef * sign(d) * (abs(d) - dmax);
                 }
             }
-            float wp = posture * posture;
+            float wp = ik.posture * ik.posture;
             h += wp;
             gv += wp * q;
-            if (referenceWeight > 0.0)
+            if (ofl.referenceWeight > 0.0)
             {
-                float wq = referenceWeight * referenceWeight;
+                float wq = ofl.referenceWeight * ofl.referenceWeight;
                 h += wq;
-                gv += wq * (q - referenceQ[frame * n + j]);
+                gv += wq * (q - ofl.referenceQ[frame * n + j]);
             }
-            float2 lim = dofLimit[j];
-            float mid = 0.5 * (lim.x + lim.y), half = 0.5 * (lim.y - lim.x) * limitMargin;
+            float2 lim = ik.dofLimit[j];
+            float mid = 0.5 * (lim.x + lim.y), half = 0.5 * (lim.y - lim.x) * ik.limitMargin;
             float excess = abs(q - mid) - half;
             if (excess > 0.0)
             {
-                float wl = limitWeight * limitWeight;
+                float wl = ik.limitWeight * ik.limitWeight;
                 h += wl;
                 gv += wl * excess * sign(q - mid);
             }
@@ -1212,11 +1225,11 @@ void solveFrame(uint frame, uint lane, bool finalRows)
         {
             // Root acceleration: second differences of position and of rotation (via logs of relative
             // rotations), same stencil as the joints.
-            float wra = rootAccelerationWeight * rootAccelerationWeight;
-            float3 pm1 = m1 ? trajRootPos[uint(f - 1)].xyz : oRootPos, pp1 = p1 ? trajRootPos[uint(f + 1)].xyz : oRootPos;
-            float3 pm2 = m2 ? trajRootPos[uint(f - 2)].xyz : pm1, pp2 = p2 ? trajRootPos[uint(f + 2)].xyz : pp1;
-            float4 rm1 = m1 ? trajRootRot[uint(f - 1)] : oRootRot, rp1 = p1 ? trajRootRot[uint(f + 1)] : oRootRot;
-            float4 rm2 = m2 ? trajRootRot[uint(f - 2)] : rm1, rp2 = p2 ? trajRootRot[uint(f + 2)] : rp1;
+            float wra = ofl.rootAccelerationWeight * ofl.rootAccelerationWeight;
+            float3 pm1 = m1 ? ofl.trajRootPos[uint(f - 1)].xyz : oRootPos, pp1 = p1 ? ofl.trajRootPos[uint(f + 1)].xyz : oRootPos;
+            float3 pm2 = m2 ? ofl.trajRootPos[uint(f - 2)].xyz : pm1, pp2 = p2 ? ofl.trajRootPos[uint(f + 2)].xyz : pp1;
+            float4 rm1 = m1 ? ofl.trajRootRot[uint(f - 1)] : oRootRot, rp1 = p1 ? ofl.trajRootRot[uint(f + 1)] : oRootRot;
+            float4 rm2 = m2 ? ofl.trajRootRot[uint(f - 2)] : rm1, rp2 = p2 ? ofl.trajRootRot[uint(f + 2)] : rp1;
             float3 eA = qlog(qmul(rm1, qconj(rm2))), eB = qlog(qmul(oRootRot, qconj(rm1)));
             float3 eC = qlog(qmul(rp1, qconj(oRootRot))), eD = qlog(qmul(rp2, qconj(rp1)));
             float hr = 0.0;
@@ -1231,11 +1244,11 @@ void solveFrame(uint frame, uint lane, bool finalRows)
                 oH[(3 + k) * HS + 3 + k] += hr;
                 oG[3 + k] += gr[k];
             }
-            if (referenceWeight > 0.0 || referenceRootWeight > 0.0)
+            if (ofl.referenceWeight > 0.0 || ofl.referenceRootWeight > 0.0)
             {
-                float wp = referenceRootWeight * referenceRootWeight, wq = referenceWeight * referenceWeight;
-                float3 dp = oRootPos - referenceRootPos[frame].xyz;
-                float3 dr = qlog(qmul(oRootRot, qconj(referenceRootRot[frame])));
+                float wp = ofl.referenceRootWeight * ofl.referenceRootWeight, wq = ofl.referenceWeight * ofl.referenceWeight;
+                float3 dp = oRootPos - ofl.referenceRootPos[frame].xyz;
+                float3 dr = qlog(qmul(oRootRot, qconj(ofl.referenceRootRot[frame])));
                 for (uint k = 0; k < 3; k++)
                 {
                     oH[k * HS + k] += wp;
@@ -1244,11 +1257,11 @@ void solveFrame(uint frame, uint lane, bool finalRows)
                     oG[3 + k] += wq * dr[k];
                 }
             }
-            float wr = rootVelocityWeight * rootVelocityWeight;
+            float wr = ofl.rootVelocityWeight * ofl.rootVelocityWeight;
             if (m1)
             {
-                float3 dp = oRootPos - trajRootPos[uint(f - 1)].xyz;
-                float3 dr = qlog(qmul(oRootRot, qconj(trajRootRot[uint(f - 1)])));
+                float3 dp = oRootPos - ofl.trajRootPos[uint(f - 1)].xyz;
+                float3 dr = qlog(qmul(oRootRot, qconj(ofl.trajRootRot[uint(f - 1)])));
                 for (uint k = 0; k < 3; k++)
                 {
                     oH[k * HS + k] += wr;
@@ -1259,8 +1272,8 @@ void solveFrame(uint frame, uint lane, bool finalRows)
             }
             if (p1)
             {
-                float3 dp = oRootPos - trajRootPos[uint(f + 1)].xyz;
-                float3 dr = qlog(qmul(oRootRot, qconj(trajRootRot[uint(f + 1)])));
+                float3 dp = oRootPos - ofl.trajRootPos[uint(f + 1)].xyz;
+                float3 dr = qlog(qmul(oRootRot, qconj(ofl.trajRootRot[uint(f + 1)])));
                 for (uint k = 0; k < 3; k++)
                 {
                     oH[k * HS + k] += wr;
@@ -1272,7 +1285,7 @@ void solveFrame(uint frame, uint lane, bool finalRows)
         }
         GroupMemoryBarrierWithGroupSync();
         for (uint v = lane; v < nv; v += O_GROUP)
-            oH[v * HS + v] += damping * (1.0 + oH[v * HS + v]);
+            oH[v * HS + v] += ik.damping * (1.0 + oH[v * HS + v]);
         GroupMemoryBarrierWithGroupSync();
 
         // Right-looking Cholesky (lower triangle of oH becomes L, diagonal in oDiag), fused with the forward
@@ -1325,15 +1338,15 @@ void solveFrame(uint frame, uint lane, bool finalRows)
             // no joint moves more than maxJointStep and the root no more than maxRootStep.
             float big = 0.0;
             for (uint j = 0; j < n; j++)
-                big = max(big, abs(oG[6 + j]) / maxJointStep);
-            big = max(big, length(float3(oG[0], oG[1], oG[2])) / maxRootStep);
-            big = max(big, length(float3(oG[3], oG[4], oG[5])) / maxJointStep);
+                big = max(big, abs(oG[6 + j]) / ofl.maxJointStep);
+            big = max(big, length(float3(oG[0], oG[1], oG[2])) / ofl.maxRootStep);
+            big = max(big, length(float3(oG[3], oG[4], oG[5])) / ofl.maxJointStep);
             float scale = big > 1.0 ? 1.0 / big : 1.0;
             oRootPos += scale * float3(oG[0], oG[1], oG[2]);
             oRootRot = normalize(qmul(qexp(scale * float3(oG[3], oG[4], oG[5])), oRootRot));
             for (uint j = 0; j < n; j++)
             {
-                float2 lim = dofLimit[j];
+                float2 lim = ik.dofLimit[j];
                 oQ[j] = clamp(oQ[j] + scale * oG[6 + j], lim.x, lim.y);
             }
         }
@@ -1343,43 +1356,40 @@ void solveFrame(uint frame, uint lane, bool finalRows)
     if (lane == 0)
     {
         float cost = 0.0;
-        for (uint r = 0; r < 6 * numTargets; r++)
+        for (uint r = 0; r < 6 * ik.numTargets; r++)
             cost += oTR[r] * oTR[r];
-        trajRootPos[frame] = float4(oRootPos, 0.0);
-        trajRootRot[frame] = oRootRot;
+        ofl.trajRootPos[frame] = float4(oRootPos, 0.0);
+        ofl.trajRootRot[frame] = oRootRot;
         for (uint j = 0; j < n; j++)
-            trajQ[frame * n + j] = oQ[j];
-        outCostOffline[frame] = cost;
+            ofl.trajQ[frame * n + j] = oQ[j];
+        ofl.outCostOffline[frame] = cost;
     }
-    for (uint i = lane; i < numLinks; i += O_GROUP)
-        trajLinkCom[frame * numLinks + i] = float4(oPos[i] + qrotate(oRot[i], linkCom[i].xyz), 0.0);
+    for (uint i = lane; i < ik.numLinks; i += O_GROUP)
+        ofl.trajLinkCom[frame * ik.numLinks + i] = float4(oPos[i] + qrotate(oRot[i], ofl.linkCom[i].xyz), 0.0);
 }
 
 [shader("compute")]
 [numthreads(OFFLINE_GROUP, 1, 1)]
 void sweep(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID)
 {
-    if (gid.x >= numFrameList)
+    if (gid.x >= ofl.numFrameList)
         return;
-    solveFrame(uint(frameList[gid.x]), gtid.x, true);
+    solveFrame(uint(ofl.frameList[gid.x]), gtid.x, true);
 }
 
 // Fixed-lag windows (FixedLagSolver): one group per stream runs `windowSweeps` symmetric Gauss-Seidel sweeps over
 // its frames [first, end) — forward, then backward — in a single dispatch. Frame by frame dispatches spent ~1.3 ms
 // of launch and scheduling per frame solve (~0.3 ms of work), which made a window tick ~100 ms.
-uniform StructuredBuffer<int2> windowFrames;    // [numWindows] (first, end) frames solved, global indices
-uniform uint numWindows;
-uniform uint windowSweeps;
 
 [shader("compute")]
 [numthreads(OFFLINE_GROUP, 1, 1)]
 void sweepWindow(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID)
 {
-    if (gid.x >= numWindows)
+    if (gid.x >= ofl.numWindows)
         return;
-    int2 w = windowFrames[gid.x];
+    int2 w = ofl.windowFrames[gid.x];
     uint count = uint(w.y - w.x);
-    for (uint s = 0; s < windowSweeps; s++)
+    for (uint s = 0; s < ofl.windowSweeps; s++)
     {
         for (uint i = 0; i < count; i++)
         {

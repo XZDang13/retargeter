@@ -8,6 +8,8 @@ import Kinematics
 
 #if canImport(Glibc)
 import Glibc
+#elseif canImport(Darwin)
+import Darwin
 #endif
 
 /// One clip for the offline solver.
@@ -41,7 +43,7 @@ public final class OfflineSolver {
     let dynamics: RobotDynamics
 
     public init(device: ComputeDevice, setup: RetargetSetup, geometry: RobotGeometry) throws {
-        guard device.backend == .cuda else { throw ComputeError(message: "the offline solver needs a GPU backend (v1: CUDA)") }
+        guard device.backend.isGPU else { throw ComputeError(message: "the offline solver needs a GPU backend (CUDA or Metal)") }
         self.device = device
         self.setup = setup
         self.geometry = geometry
@@ -319,7 +321,11 @@ public final class OfflineSolver {
         var arguments: [KernelArgument] = model.map { .buffer($0.key, $0.value) }
         // Fixed-lag windows leave the acceleration limit off (no per-frame limits); batch solves bind theirs.
         if window != nil { arguments.append(.buffer("accelerationLimit", try device.makeBuffer([Float(0)]))) }
-        arguments += [
+        let wristLink = { (yaw: String, roll: String) in Int32(robot.linkIndex(named: yaw) ?? robot.linkIndex(named: roll) ?? -1) }
+        let smoothLinks = SIMD2<Int32>(wristLink("left_wrist_yaw_link", "left_wrist_roll_link"),
+                                       wristLink("right_wrist_yaw_link", "right_wrist_roll_link"))
+        // Split into typed literals: one literal this long does not type-check in reasonable time with every toolchain.
+        let modelArguments: [KernelArgument] = [
             .value("numLinks", UInt32(L)), .value("numDofs", UInt32(n)), .value("numTargets", UInt32(T)),
             .buffer("linkDepth", try device.makeBuffer(linkDepth)), .value("maxDepth", UInt32(linkDepth.max() ?? 0)),
             .buffer("colTargets", try device.makeBuffer(colTargets)), .buffer("dofLink", try device.makeBuffer(dofLink)),
@@ -328,6 +334,8 @@ public final class OfflineSolver {
             .buffer("armTargets", try device.makeBuffer(armTargets)),
             .buffer("linkSegment", try device.makeBuffer(linkSegment)),
             .buffer("medianRadius", try device.makeBuffer(geometry.capsules.map { Float($0?.radius ?? 0) })),
+        ]
+        let weightArguments: [KernelArgument] = [
             .value("sweepIterations", UInt32(o.iterations)),
             .value("damping", Float(s.damping)), .value("posture", Float(s.posture)),
             .value("limitMargin", Float(s.limitMargin)), .value("limitWeight", Float(s.limitWeight)),
@@ -335,8 +343,9 @@ public final class OfflineSolver {
             .value("rootVelocityWeight", Float(o.rootVelocity)), .value("groundWeight", Float(o.ground)),
             .value("groundMargin", Float(o.groundMargin)), .value("collisionWeight", Float(o.collision)),
             .value("collisionMargin", Float(o.collisionMargin)), .value("collisionBand", Float(o.collisionBand)),
-            .value("smoothLinks", SIMD2<Int32>(Int32(robot.linkIndex(named: "left_wrist_yaw_link") ?? robot.linkIndex(named: "left_wrist_roll_link") ?? -1),
-                                               Int32(robot.linkIndex(named: "right_wrist_yaw_link") ?? robot.linkIndex(named: "right_wrist_roll_link") ?? -1))),
+        ]
+        let dynamicsArguments: [KernelArgument] = [
+            .value("smoothLinks", smoothLinks),
             .value("linkAccelerationWeight", Float(o.handAcceleration)),
             .value("accelerationLimitWeight", Float(window == nil ? o.accelerationLimit : 0)),
             .value("rootAccelerationWeight", Float(o.rootAcceleration)), .value("dynamicsWeight", Float(window ?? o.dynamics)),
@@ -344,6 +353,9 @@ public final class OfflineSolver {
             .value("contactIterations", UInt32(o.contactIterations)),
             .value("dynamicsStride", UInt32(stride)), .value("forceFree", UInt32(o.dynamicsModel == "force_free" ? 1 : 0)), .value("maxJointStep", Float(o.maxJointStep)), .value("maxRootStep", Float(o.maxRootStep)),
         ]
+        arguments += modelArguments
+        arguments += weightArguments
+        arguments += dynamicsArguments
         constants[key] = arguments
         return arguments
     }

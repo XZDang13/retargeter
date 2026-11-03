@@ -13,6 +13,17 @@ import Glibc
 import Darwin
 #endif
 
+// libc's close/send, reachable from types that declare their own `send`. MSG_NOSIGNAL is Linux-only; on Darwin the
+// HTTP server ignores SIGPIPE process-wide.
+private func closeSocket(_ fd: Int32) { close(fd) }
+private func sendSocket(_ fd: Int32, _ bytes: UnsafeRawBufferPointer) -> Int {
+    #if canImport(Glibc)
+    send(fd, bytes.baseAddress, bytes.count, Int32(MSG_NOSIGNAL))
+    #else
+    send(fd, bytes.baseAddress, bytes.count, 0)
+    #endif
+}
+
 public final class LiveViewerHub: @unchecked Sendable {
     let robot: RobotModel
     let maxRate: Double
@@ -35,7 +46,7 @@ public final class LiveViewerHub: @unchecked Sendable {
                 return .notFound
             }
         }, upgrade: { [unowned self] request, fd in
-            guard request.path == "/ws" else { Glibc.close(fd); return }
+            guard request.path == "/ws" else { closeSocket(fd); return }
             var timeout = timeval(tv_sec: 0, tv_usec: 20_000)   // a stalled browser cannot hold up the server
             setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
             self.lock.withLock {
@@ -75,9 +86,9 @@ public final class LiveViewerHub: @unchecked Sendable {
     func send(_ fd: Int32, _ bytes: [UInt8]) {
         var offset = 0
         while offset < bytes.count {
-            let n = bytes[offset...].withUnsafeBytes { Glibc.send(fd, $0.baseAddress, $0.count, Int32(MSG_NOSIGNAL)) }
+            let n = bytes[offset...].withUnsafeBytes { sendSocket(fd, $0) }
             if n <= 0 {
-                Glibc.close(fd)
+                closeSocket(fd)
                 sockets.removeAll { $0 == fd }
                 return
             }

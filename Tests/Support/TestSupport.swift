@@ -2,6 +2,8 @@
 
 #if canImport(Glibc)
 import Glibc
+#elseif canImport(Darwin)
+import Darwin
 #endif
 
 /// Root of the SOMA uniform BVH clips (BONES-SEED): $SOMA_BVH_ROOT, else ~/Downloads/soma_uniform/bvh; with a

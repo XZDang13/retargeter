@@ -111,7 +111,9 @@ Languages:
 - A low-LOD skinned vertex set + LBS weights + per-vertex **contact group** label, posed per frame by an
   LBS kernel from the global joint transforms.
 - SOMA: 4,505-vertex LOD baked once from SOMA-X + BONES-SEED shape (`tools/bake_soma_surface.py` →
-  `assets/body_models/soma/surface.npz`). SMPL-X: native LBS from the local model npz (10,475 vertices,
+  `assets/body_models/soma/surface_lo.npz`), in numpy: SOMA-X's low-LOD MHR body model is exported once as fixed
+  arrays (`tools/export_soma_x_model.py` → `soma_x_model.npz`, checked against SOMA-X: rest shape 5e-7 m, bind
+  rotations 1.4e-5), so baking needs neither SOMA-X nor torch. SMPL-X: native LBS from the local model npz (10,475 vertices,
   or a decimated subset); groups from the Meshcapade SMPL-X part segmentation.
 - Fallback when no mesh is available: capsules/spheres per bone (sole box, heel, toe, knee, hand,
   pelvis, back), radii from anthropometrics.

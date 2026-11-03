@@ -4,24 +4,34 @@ Human motion (SOMA / SMPL-X) → Unitree G1 retargeting in Swift + Slang. Design
 
 ## Setup
 
-Needs Linux x86-64 with an NVIDIA GPU (CUDA driver), a Swift 6 toolchain ([swiftly](https://www.swift.org/install)),
-[xmake](https://xmake.io) 3, cmake, git and Python 3.10+. Then:
+Runs on Linux (x86-64 or arm64) with an NVIDIA GPU and CUDA driver, or on macOS with Metal (Apple silicon; Xcode
+installed). You need Swift 6 ([swiftly](https://www.swift.org/install/linux/) on Linux, Xcode on macOS) and git.
+Everything else is fetched:
 
 ```bash
 ./setup.sh
 ```
 
-It checks the prerequisites, builds (the first run downloads and builds Slang and slang-rhi), makes the tooling
-venv `build/tools/venv` (`tools/requirements.txt`: robot mesh export, the teleop client) and exports the robot
-meshes for the viewer. Re-running skips finished steps; `--help` lists the options.
+- **Tools.** xmake 3 and [uv](https://docs.astral.sh/uv/) are used from `PATH` when present. Otherwise pinned,
+  checksummed builds go to `build/tools/bin`. xmake brings cmake when it is missing, and uv brings Python 3.12 when the
+  system has no new enough one. On macOS the Metal Toolchain (an Xcode component) is installed when missing.
+- **Build.** The first run downloads Slang and builds slang-rhi with the platform's GPU backend.
+- **Venv.** It makes the tooling venv `build/tools/venv` (`tools/requirements.txt`: robot mesh export, the teleop
+  client, the Hugging Face CLI) and exports the robot meshes for the viewer.
+- **SOMA body surface.** Retargeting, the viewer's body and most tests need `assets/body_models/soma/surface_lo.npz`,
+  baked from the BONES-SEED shapes. [BONES-SEED](https://huggingface.co/datasets/bones-studio/seed) is gated: accept
+  its licence, then log in once with `build/tools/venv/bin/hf auth login` (or set `HF_TOKEN`). `setup.sh` downloads
+  `soma_shapes/` (a few MB) into `assets/body_models/soma/seed_soma_shapes` and bakes the surface with numpy, in well
+  under a second. SOMA-X's body model (the low-LOD MHR identity model, topology and skeleton transfer, rig) comes as
+  fixed arrays in `assets/body_models/soma/soma_x_model.npz` (Apache-2.0, [notice](assets/body_models/soma/SOMA-X_NOTICE.md)),
+  so setup needs neither SOMA-X nor torch. Maintainers regenerate those arrays from a pinned SOMA-X with
+  `tools/export_soma_x_model.py`, which also checks the numpy bake against SOMA-X itself.
+- **Clips.** The retargeting tests and examples read the SOMA uniform BVH clips from `~/Downloads/soma_uniform/bvh`
+  (or `SOMA_BVH_ROOT`); `./setup.sh --download-motions [DIR]` fetches the 45 GB archive. Setup itself does not need
+  them: without clips the bake checks its alignment on the base rig that comes with the shapes.
 
-**SOMA body surface.** Retargeting, the viewer's body and most tests need `assets/body_models/soma/surface_lo.npz`,
-baked from the BONES-SEED shapes. Put the BONES-SEED `soma_shapes/` folder at
-`assets/body_models/soma/seed_soma_shapes` and the SOMA uniform BVH clips at `~/Downloads/soma_uniform/bvh` (or set
-`SOMA_BVH_ROOT`), then run `./setup.sh` again: it adds torch (CPU) and SOMA-X to the venv
-(`tools/requirements-soma.txt`, ~3 GB) and bakes the surface. BONES-SEED data and anything derived from it
-(`seed_soma_shapes/`, `surface_*.npz`) is licensed and must not be committed or redistributed; `.gitignore`
-excludes it.
+BONES-SEED data and anything derived from it (`seed_soma_shapes/`, `surface_*.npz`) is licensed and must not be
+committed or redistributed; `.gitignore` excludes it. Re-running skips finished steps; `--help` lists the options.
 
 ## Test
 
@@ -31,10 +41,13 @@ xmake test     # all test suites (parity, dynamics identities, retargeting, vali
 
 The tests read clips from `SOMA_BVH_ROOT` (default `~/Downloads/soma_uniform/bvh`).
 
+Build products land in `build/release/` on every platform. The GPU backend is CUDA on Linux and Metal on macOS
+(`--backend cpu` for the CPU one).
+
 ## Retarget (realtime solver, batched)
 
 ```bash
-build/linux/x86_64/release/retarget realtime ~/Downloads/soma_uniform/bvh/230322 --robot g1_29dof --out out --exclude '*_M.bvh'
+build/release/retarget realtime ~/Downloads/soma_uniform/bvh/230322 --robot g1_29dof --out out --exclude '*_M.bvh'
 ```
 
 Writes one `.npz` per clip (50 fps by default) plus `out/manifest.jsonl`; rerunning skips finished clips.
@@ -50,13 +63,13 @@ also carries the validator's joint torques (`tau`), contact forces (`contact_for
 Validate trajectories from any tool (our `.npz`, NVIDIA soma-retargeter `.csv`) against their source clips:
 
 ```bash
-build/linux/x86_64/release/retarget validate out --human ~/Downloads/soma_uniform/bvh --report validation.jsonl
+build/release/retarget validate out --human ~/Downloads/soma_uniform/bvh --report validation.jsonl
 ```
 
 ## Teleop (live streaming)
 
 ```bash
-build/linux/x86_64/release/retarget teleop --viewer-port 8770      # ZeroMQ server on tcp://127.0.0.1:5560
+build/release/retarget teleop --viewer-port 8770      # ZeroMQ server on tcp://127.0.0.1:5560
 build/tools/venv/bin/python -m retargeter_client ~/Downloads/soma_uniform/bvh/210531/walk_forward_amateur_001__A001.bvh
 ```
 
@@ -73,7 +86,7 @@ source (DESIGN §10 for the messages); `retarget teleop --help` lists the server
 ## Viewer
 
 ```bash
-build/linux/x86_64/release/retarget view --port 8080 --motions ~/Downloads/soma_uniform/bvh
+build/release/retarget view --port 8080 --motions ~/Downloads/soma_uniform/bvh
 ```
 
 Open http://127.0.0.1:8080/. Space toggles playback; ←/→ step frames.

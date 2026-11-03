@@ -6,27 +6,27 @@ import retarget_ik_common;
 void solve(uint3 tid: SV_DispatchThreadID)
 {
     uint s = tid.x;
-    if (s >= numStreams)
+    if (s >= ik.numStreams)
         return;
-    uint n = numDofs;
+    uint n = ik.numDofs;
     uint nv = 6 + n;
-    int offset = streamFrameOffset[s];
-    int frames = streamFrameCount[s];
+    int offset = ik.streamFrameOffset[s];
+    int frames = ik.streamFrameCount[s];
 
     float3 rootPos;
     float4 rootRot;
     float q[MAX_DOFS];
     for (uint j = 0; j < MAX_DOFS; j++)
-        q[j] = j < n ? stateQ[s * n + j] : 0.0;
-    if (stateValid[s] != 0)
+        q[j] = j < n ? ik.stateQ[s * n + j] : 0.0;
+    if (ik.stateValid[s] != 0)
     {
-        rootPos = stateRootPos[s].xyz;
-        rootRot = stateRootRot[s];
+        rootPos = ik.stateRootPos[s].xyz;
+        rootRot = ik.stateRootRot[s];
     }
     else
     {
-        rootPos = goalPos[offset * numTargets + rootTarget].xyz;
-        rootRot = goalRot[offset * numTargets + rootTarget];
+        rootPos = ik.goalPos[offset * ik.numTargets + ik.rootTarget].xyz;
+        rootRot = ik.goalRot[offset * ik.numTargets + ik.rootTarget];
         for (uint j = 0; j < n; j++)
             q[j] = 0.0;
     }
@@ -45,9 +45,9 @@ void solve(uint3 tid: SV_DispatchThreadID)
             qPrev[j] = q[j];
         float cost = 0.0;
         // A cold stream's first frame starts from q = 0: converge it fully and without the smoothness pull.
-        bool cold = f == 0 && stateValid[s] == 0;
-        uint frameIterations = cold ? max(iterations, coldIterations) : iterations;
-        float frameSmoothness = cold ? 0.0 : smoothness;
+        bool cold = f == 0 && ik.stateValid[s] == 0;
+        uint frameIterations = cold ? max(ik.iterations, ik.coldIterations) : ik.iterations;
+        float frameSmoothness = cold ? 0.0 : ik.smoothness;
 
         for (uint it = 0; it <= frameIterations; it++)
         {
@@ -58,18 +58,18 @@ void solve(uint3 tid: SV_DispatchThreadID)
                 g[a] = 0.0;
             cost = 0.0;
 
-            for (uint t = 0; t < numTargets; t++)
+            for (uint t = 0; t < ik.numTargets; t++)
             {
-                int link = targetLink[t];
-                float2 w = targetWeight[t];
+                int link = ik.targetLink[t];
+                float2 w = ik.targetWeight[t];
                 float3 p = pose.pos[link];
-                uint chain0 = uint(chainStart[t]);
-                uint chainN = uint(chainCount[t]);
+                uint chain0 = uint(ik.chainStart[t]);
+                uint chainN = uint(ik.chainCount[t]);
                 uint nc = 6 + chainN;
                 for (uint c = 0; c < 6; c++)
                     cols[c] = int(c);
                 for (uint c = 0; c < chainN; c++)
-                    cols[6 + c] = 6 + linkDof[chainLinks[chain0 + c]];
+                    cols[6 + c] = 6 + ik.linkDof[ik.chainLinks[chain0 + c]];
 
                 for (uint kind = 0; kind < 2; kind++)
                 {
@@ -79,7 +79,7 @@ void solve(uint3 tid: SV_DispatchThreadID)
                     float3 r;
                     if (kind == 0)
                     {
-                        r = weight * (p - goalPos[frame * numTargets + t].xyz);
+                        r = weight * (p - ik.goalPos[frame * ik.numTargets + t].xyz);
                         // root translation, root rotation (w x (p - p_root)), joints (a x (p - o))
                         float3 d = p - rootPos;
                         for (uint row = 0; row < 3; row++)
@@ -98,7 +98,7 @@ void solve(uint3 tid: SV_DispatchThreadID)
                         }
                         for (uint c = 0; c < chainN; c++)
                         {
-                            int l = chainLinks[chain0 + c];
+                            int l = ik.chainLinks[chain0 + c];
                             float3 col = cross(pose.axis[l], p - pose.origin[l]);
                             for (uint row = 0; row < 3; row++)
                                 J[row * nc + 6 + c] = weight * col[row];
@@ -106,9 +106,9 @@ void solve(uint3 tid: SV_DispatchThreadID)
                     }
                     else
                     {
-                        float4 twist = targetTwist[t];
+                        float4 twist = ik.targetTwist[t];
                         float3 axis = qrotate(pose.rot[link], twist.xyz);
-                        r = untwist(weight * qlog(qmul(pose.rot[link], qconj(goalRot[frame * numTargets + t]))), axis, twist.w);
+                        r = untwist(weight * qlog(qmul(pose.rot[link], qconj(ik.goalRot[frame * ik.numTargets + t]))), axis, twist.w);
                         for (uint row = 0; row < 3; row++)
                         {
                             J[row * nc + 0] = 0.0;
@@ -123,7 +123,7 @@ void solve(uint3 tid: SV_DispatchThreadID)
                         }
                         for (uint c = 0; c < chainN; c++)
                         {
-                            float3 a = untwist(weight * pose.axis[chainLinks[chain0 + c]], axis, twist.w);
+                            float3 a = untwist(weight * pose.axis[ik.chainLinks[chain0 + c]], axis, twist.w);
                             for (uint row = 0; row < 3; row++)
                                 J[row * nc + 6 + c] = a[row];
                         }
@@ -149,21 +149,21 @@ void solve(uint3 tid: SV_DispatchThreadID)
             for (uint j = 0; j < n; j++)
             {
                 uint v = 6 + j;
-                float2 lim = dofLimit[j];
-                float mid = 0.5 * (lim.x + lim.y), half = 0.5 * (lim.y - lim.x) * limitMargin;
-                float ws = frameSmoothness * frameSmoothness, wp = posture * posture;
+                float2 lim = ik.dofLimit[j];
+                float mid = 0.5 * (lim.x + lim.y), half = 0.5 * (lim.y - lim.x) * ik.limitMargin;
+                float ws = frameSmoothness * frameSmoothness, wp = ik.posture * ik.posture;
                 H[v * MAX_VARS + v] += ws + wp;
                 g[v] += ws * (q[j] - qPrev[j]) + wp * q[j];
                 float excess = abs(q[j] - mid) - half;
                 if (excess > 0.0)
                 {
-                    float wl = limitWeight * limitWeight;
+                    float wl = ik.limitWeight * ik.limitWeight;
                     H[v * MAX_VARS + v] += wl;
                     g[v] += wl * excess * sign(q[j] - mid);
                 }
             }
             for (uint v = 0; v < nv; v++)
-                H[v * MAX_VARS + v] += damping * (1.0 + H[v * MAX_VARS + v]);
+                H[v * MAX_VARS + v] += ik.damping * (1.0 + H[v * MAX_VARS + v]);
 
             choleskySolve(H, g, nv);
 
@@ -171,21 +171,21 @@ void solve(uint3 tid: SV_DispatchThreadID)
             rootRot = normalize(qmul(qexp(float3(g[3], g[4], g[5])), rootRot));
             for (uint j = 0; j < n; j++)
             {
-                float2 lim = dofLimit[j];
+                float2 lim = ik.dofLimit[j];
                 q[j] = clamp(q[j] + g[6 + j], lim.x, lim.y);
             }
         }
 
-        outRootPos[frame] = float4(rootPos, 0.0);
-        outRootRot[frame] = rootRot;
+        ik.outRootPos[frame] = float4(rootPos, 0.0);
+        ik.outRootRot[frame] = rootRot;
         for (uint j = 0; j < n; j++)
-            outQ[frame * n + j] = q[j];
-        outCost[frame] = cost;
+            ik.outQ[frame * n + j] = q[j];
+        ik.outCost[frame] = cost;
     }
 
-    stateRootPos[s] = float4(rootPos, 0.0);
-    stateRootRot[s] = rootRot;
+    ik.stateRootPos[s] = float4(rootPos, 0.0);
+    ik.stateRootRot[s] = rootRot;
     for (uint j = 0; j < n; j++)
-        stateQ[s * n + j] = q[j];
+        ik.stateQ[s * n + j] = q[j];
 }
 

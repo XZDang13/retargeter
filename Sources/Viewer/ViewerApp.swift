@@ -55,7 +55,7 @@ public final class ViewerApp: Sendable {
         self.surface = surface
         contactGroups = surface.flatMap { try? ContactGroups.soma($0) }
         var state: GPUState?
-        if let surface, let device = try? ComputeDevice.makeDefault(backend: .cuda),
+        if let surface, let device = try? ComputeDevice.makeDefault(backend: .gpu),
            let skinning = try? SurfaceSkinning(device: device, surface: surface) {
             state = GPUState(device: device, skinning: skinning)
             // Build the retargeters (and compile their kernels) here on the main thread: Slang compilation
@@ -83,7 +83,7 @@ public final class ViewerApp: Sendable {
     public func run() throws -> Never {
         print("viewer: http://127.0.0.1:\(config.port)/  (motions from \(config.motionRoot))")
         if surface == nil { print("viewer: no body surface (run tools/bake_soma_surface.py); skeleton only") }
-        print("viewer: contact analysis on \(gpu.withLock { $0 == nil } ? "CPU (no CUDA device)" : "CUDA")")
+        print("viewer: contact analysis on \(gpu.withLock { $0 == nil } ? "CPU (no GPU device)" : "GPU (\(Backend.gpu))")")
         let server = HTTPServer(port: config.port) { [self] request in self.handle(request) }
         try server.run()
     }
@@ -227,7 +227,7 @@ public final class ViewerApp: Sendable {
         do {
             trajectory = try gpu.withLock { state -> RobotTrajectory in
                 guard let retargeter = state?.retargeters[robot.name] else {
-                    throw ComputeError(message: "retargeting unavailable (needs CUDA and the body surface)")
+                    throw ComputeError(message: "retargeting unavailable (needs a GPU and the body surface)")
                 }
                 let result: RetargetResult
                 if offline, let solver = state?.offline[robot.name] {

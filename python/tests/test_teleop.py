@@ -41,7 +41,7 @@ def main() -> int:
 
 def run(lag, budget, check, failures) -> None:
     """Streams two clips through a server with the given lag; end-to-end p95 must stay under `budget` ms."""
-    server = subprocess.Popen([os.path.join(ROOT, "build/linux/x86_64/release/retarget"), "teleop", "--bind", ENDPOINT,
+    server = subprocess.Popen([os.path.join(ROOT, "build/release/retarget"), "teleop", "--bind", ENDPOINT,
                                "--slots", "2", "--quiet", "--lag", str(lag)],
                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     before = len(failures)

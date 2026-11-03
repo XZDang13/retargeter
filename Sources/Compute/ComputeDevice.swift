@@ -5,15 +5,28 @@ import Darwin
 #endif
 import CRTCompute
 
-/// Compute backend. v1 targets CUDA; the CPU backend is used for parity tests and as a fallback.
+/// Compute backend: CUDA on Linux, Metal on macOS; the CPU backend is used for parity tests and as a fallback.
 public enum Backend: Sendable, CustomStringConvertible {
     case cpu
     case cuda
+    case metal
+
+    /// The GPU backend of this platform.
+    public static var gpu: Backend {
+        #if os(macOS)
+        .metal
+        #else
+        .cuda
+        #endif
+    }
+
+    public var isGPU: Bool { self != .cpu }
 
     var raw: rtc_backend {
         switch self {
         case .cpu: RTC_BACKEND_CPU
         case .cuda: RTC_BACKEND_CUDA
+        case .metal: RTC_BACKEND_METAL
         }
     }
 
@@ -21,6 +34,7 @@ public enum Backend: Sendable, CustomStringConvertible {
         switch self {
         case .cpu: "cpu"
         case .cuda: "cuda"
+        case .metal: "metal"
         }
     }
 }

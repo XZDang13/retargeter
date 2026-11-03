@@ -2,7 +2,22 @@
 
 #if canImport(Glibc)
 import Glibc
+#elseif canImport(Darwin)
+import Darwin
 #endif
+
+// pthread_t is an integer on Linux and an (optional) pointer on Darwin; the start routine's argument is optional
+// only on Linux.
+#if canImport(Darwin)
+private typealias ThreadHandle = pthread_t?
+private var noThread: ThreadHandle { nil }
+private func join(_ thread: ThreadHandle) { if let thread { pthread_join(thread, nil) } }
+#else
+private typealias ThreadHandle = pthread_t
+private var noThread: ThreadHandle { pthread_t() }
+private func join(_ thread: ThreadHandle) { pthread_join(thread, nil) }
+#endif
+private func threadContext(_ raw: UnsafeMutableRawPointer?) -> UnsafeMutableRawPointer { raw! }
 
 private final class ParallelJob: @unchecked Sendable {
     let body: @Sendable (Int) -> Void
@@ -49,12 +64,12 @@ public func parallelMap<T>(_ count: Int, threads: Int? = nil, _ body: @escaping 
     if workers <= 1 { return (0..<count).map(body) }
     let results = ResultBox<T>(count: count)
     let job = ParallelJob(count: count) { i in results.set(i, body(i)) }
-    var handles: [pthread_t] = []
+    var handles: [ThreadHandle] = []
     for _ in 0..<workers {
-        var thread = pthread_t()
+        var thread = noThread
         let context = Unmanaged.passRetained(job).toOpaque()
         let status = pthread_create(&thread, nil, { raw in
-            let job = Unmanaged<ParallelJob>.fromOpaque(raw!).takeRetainedValue()
+            let job = Unmanaged<ParallelJob>.fromOpaque(threadContext(raw)).takeRetainedValue()
             while let i = job.take() { job.body(i) }
             return nil
         }, context)
@@ -66,7 +81,7 @@ public func parallelMap<T>(_ count: Int, threads: Int? = nil, _ body: @escaping 
     }
     // Work on this thread too (also covers a failed thread start).
     while let i = job.take() { job.body(i) }
-    for thread in handles { pthread_join(thread, nil) }
+    for thread in handles { join(thread) }
     return results.values.map { $0! }
 }
 
@@ -99,14 +114,14 @@ private final class ThreadJob {
 /// Runs `body` on a thread of its own; `wait()` blocks until it is done and returns its result (once).
 public final class Background<T>: @unchecked Sendable {
     private var result: Result<T, Error>?
-    private var thread = pthread_t()
+    private var thread = noThread
     private var started = false
 
     public init(_ body: @escaping () throws -> T) {
         let job = ThreadJob { self.result = Result { try body() } }   // released when the thread ends
         let context = Unmanaged.passRetained(job).toOpaque()
         started = pthread_create(&thread, nil, { raw in
-            Unmanaged<ThreadJob>.fromOpaque(raw!).takeRetainedValue().run()
+            Unmanaged<ThreadJob>.fromOpaque(threadContext(raw)).takeRetainedValue().run()
             return nil
         }, context) == 0
         if !started {
@@ -117,7 +132,7 @@ public final class Background<T>: @unchecked Sendable {
 
     public func wait() throws -> T {
         if started {
-            pthread_join(thread, nil)
+            join(thread)
             started = false
         }
         return try result!.get()

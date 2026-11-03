@@ -12,6 +12,8 @@ import Retarget
 
 #if canImport(Glibc)
 import Glibc
+#elseif canImport(Darwin)
+import Darwin
 #endif
 
 // MARK: - Rules
@@ -237,8 +239,9 @@ public struct Validator: Sendable {
         let samples = stride(from: 0, to: smoothed.count, by: step).map { smoothed[$0] }
         guard samples.count >= 5 else { return 0 }
         let h = Double(step) / fps
-        let jerk = (1..<(samples.count - 2)).map { k in
-            length(samples[k + 2] - 3 * samples[k + 1] + 3 * samples[k] - samples[k - 1]) / (h * h * h)
+        let jerk = (1..<(samples.count - 2)).map { (k: Int) -> Double in
+            let d: Vec3 = (samples[k + 2] - samples[k - 1]) + 3 * (samples[k] - samples[k + 1])
+            return length(d) / (h * h * h)
         }
         let width = max(1, Int(window / h))
         if jerk.count <= width { return jerk.reduce(0, +) / Double(jerk.count) }

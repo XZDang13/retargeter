@@ -240,6 +240,8 @@ struct rtc_kernel_t
     ComPtr<IShaderProgram> program;
     ComPtr<IComputePipeline> pipeline;
     uint32_t groupSize[3];
+    // Struct-typed globals (parameter blocks): arguments not found among the globals are looked up in these.
+    std::vector<std::string> blocks;
 };
 
 extern "C" {
@@ -261,6 +263,9 @@ rtc_status rtc_device_create(const rtc_device_desc* desc, rtc_device* outDevice)
     case RTC_BACKEND_CUDA:
         type = DeviceType::CUDA;
         break;
+    case RTC_BACKEND_METAL:
+        type = DeviceType::Metal;
+        break;
     default:
         return fail("unknown backend");
     }
@@ -275,14 +280,16 @@ rtc_status rtc_device_create(const rtc_device_desc* desc, rtc_device* outDevice)
     deviceDesc.enableRayTracing = false;
     if (desc->cache_dir)
     {
-        handle->cache = std::make_unique<FileCache>(fs::path(desc->cache_dir) / (type == DeviceType::CUDA ? "cuda" : "cpu"));
+        handle->cache = std::make_unique<FileCache>(fs::path(desc->cache_dir) / (type == DeviceType::CUDA ? "cuda" : type == DeviceType::Metal ? "metal" : "cpu"));
         deviceDesc.persistentShaderCache = handle->cache.get();
     }
     if (desc->verbose)
         deviceDesc.debugCallback = &g_stderrCallback;
 
     if (SLANG_FAILED(getRHI()->createDevice(deviceDesc, handle->device.writeRef())) || !handle->device)
-        return fail(desc->backend == RTC_BACKEND_CUDA ? "failed to create CUDA device" : "failed to create CPU device");
+        return fail(type == DeviceType::CUDA    ? "failed to create CUDA device"
+                    : type == DeviceType::Metal ? "failed to create Metal device"
+                                                : "failed to create CPU device");
     if (SLANG_FAILED(handle->device->getQueue(QueueType::Graphics, handle->queue.writeRef())))
         return fail("failed to get device queue");
 
@@ -440,8 +447,19 @@ static rtc_status finishKernel(
 
     SlangUInt size[3] = {1, 1, 1};
     if (auto layout = linked->getLayout())
+    {
         if (auto ep = layout->getEntryPointByIndex(0))
             ep->getComputeThreadGroupSize(3, size);
+        for (unsigned i = 0; i < layout->getParameterCount(); ++i)
+        {
+            slang::VariableLayoutReflection* param = layout->getParameterByIndex(i);
+            auto kind = param->getTypeLayout()->getKind();
+            if (param->getName() && (kind == slang::TypeReflection::Kind::Struct ||
+                                     kind == slang::TypeReflection::Kind::ParameterBlock ||
+                                     kind == slang::TypeReflection::Kind::ConstantBuffer))
+                handle->blocks.push_back(param->getName());
+        }
+    }
     for (int i = 0; i < 3; ++i)
         handle->groupSize[i] = uint32_t(size[i] ? size[i] : 1);
 
@@ -515,6 +533,8 @@ rtc_status rtc_dispatch(
     {
         const rtc_arg& arg = args[i];
         ShaderCursor cursor = globals[arg.name];
+        for (size_t b = 0; !cursor.isValid() && b < kernel->blocks.size(); ++b)
+            cursor = globals[kernel->blocks[b].c_str()][arg.name];
         if (!cursor.isValid())
             cursor = entry[arg.name];
         if (!cursor.isValid())

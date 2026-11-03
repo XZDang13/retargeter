@@ -8,6 +8,8 @@ import Validate
 
 #if canImport(Glibc)
 import Glibc
+#elseif canImport(Darwin)
+import Darwin
 #endif
 
 struct RealtimeCommand {
@@ -18,7 +20,7 @@ struct RealtimeCommand {
     var output = "out"
     var fps = 50.0
     var batch = 64
-    var backend = Backend.cuda
+    var backend = Backend.gpu
     var withBodies = false
     var overwrite = false
     var autoReject = true
@@ -39,7 +41,7 @@ struct RealtimeCommand {
       --out DIR           output directory (default ./out); mirrors the input layout
       --fps N             output frame rate (default 50)
       --batch N           clips solved per device dispatch (default 64)
-      --backend B         cuda (default) | cpu
+      --backend B         gpu (default: CUDA on Linux, Metal on macOS) | cpu
       --with-bodies       also store link poses (body_pos / body_quat)
       --include GLOB      only files whose name matches (repeatable)
       --exclude GLOB      skip files whose name matches, e.g. '*_M.bvh' (repeatable)
@@ -68,7 +70,7 @@ struct RealtimeCommand {
             case "--out": output = try value()
             case "--fps": fps = Double(try value()) ?? fps
             case "--batch": batch = max(1, Int(try value()) ?? batch)
-            case "--backend": backend = try value() == "cpu" ? .cpu : .cuda
+            case "--backend": backend = try value() == "cpu" ? .cpu : .gpu
             case "--with-bodies": withBodies = true
             case "--overwrite": overwrite = true
             case "--include": include.append(try value())

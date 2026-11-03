@@ -143,10 +143,12 @@ extension HumanFrame {
     /// Local joint transforms; nil if the arrays do not match the skeleton.
     public func localTransforms(skeleton: HumanSkeleton) -> [Transform]? {
         guard jointQuat.count == 4 * skeleton.jointCount, jointPos.count == 3 * skeleton.jointCount else { return nil }
-        return (0..<skeleton.jointCount).map { j in
-            Transform(rotation: Quat(w: Double(jointQuat[4 * j]), x: Double(jointQuat[4 * j + 1]),
-                                     y: Double(jointQuat[4 * j + 2]), z: Double(jointQuat[4 * j + 3])).normalized,
-                      translation: Vec3(Double(jointPos[3 * j]), Double(jointPos[3 * j + 1]), Double(jointPos[3 * j + 2])))
+        return (0..<skeleton.jointCount).map { (j: Int) -> Transform in
+            let q = 4 * j, p = 3 * j
+            let rotation = Quat(w: Double(jointQuat[q]), x: Double(jointQuat[q + 1]),
+                                y: Double(jointQuat[q + 2]), z: Double(jointQuat[q + 3])).normalized
+            let translation = Vec3(Double(jointPos[p]), Double(jointPos[p + 1]), Double(jointPos[p + 2]))
+            return Transform(rotation: rotation, translation: translation)
         }
     }
 }

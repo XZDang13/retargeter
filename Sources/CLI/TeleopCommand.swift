@@ -15,6 +15,8 @@ import Viewer
 
 #if canImport(Glibc)
 import Glibc
+#elseif canImport(Darwin)
+import Darwin
 #endif
 
 /// Monotonic clock (s); CLOCK_MONOTONIC is shared by the processes of one machine (Python: time.monotonic()).
@@ -104,7 +106,7 @@ struct TeleopCommand {
         let validator = try Validator.load(repository: repository, robot: model, robotDirectory: directory, rejectConfig: nil)
         let mapping = try RetargetMapping.load(file: repository + "/Configs/mappings/soma77_\(robot).json")
         let surface = try BodySurface.load(file: repository + "/assets/body_models/soma/surface_lo.npz")
-        let device = try ComputeDevice.makeDefault(backend: .cuda)
+        let device = try ComputeDevice.makeDefault(backend: .gpu)
         let groups = try ContactGroups.soma(surface).names
 
         let socket = try ZMQSocket(.router)

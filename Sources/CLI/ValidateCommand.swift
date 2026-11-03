@@ -9,6 +9,8 @@ import Validate
 
 #if canImport(Glibc)
 import Glibc
+#elseif canImport(Darwin)
+import Darwin
 #endif
 
 struct ValidateCommand {
@@ -68,7 +70,7 @@ struct ValidateCommand {
         let validator = try Validator.load(repository: repository, robot: model, robotDirectory: directory, rejectConfig: rejectConfig)
         let mapping = try RetargetMapping.load(file: repository + "/Configs/mappings/soma77_\(robot).json")
         let surface = try BodySurface.load(file: repository + "/assets/body_models/soma/surface_lo.npz")
-        let device = try ComputeDevice.makeDefault(backend: .cuda)
+        let device = try ComputeDevice.makeDefault(backend: .gpu)
         var retargeter: HumanRetargeter?
 
         var files: [(String, String)] = []

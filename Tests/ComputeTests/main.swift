@@ -6,6 +6,8 @@ import Dispatch
 
 #if canImport(Glibc)
 import Glibc
+#elseif canImport(Darwin)
+import Darwin
 #endif
 
 // MARK: - Minimal test harness
@@ -129,7 +131,7 @@ let kernelDir = repoRoot + "/Kernels/spike"
     try device.wait()
 
     // Timing: steady-state dispatch + wait.
-    let iterations = backend == .cuda ? 50 : 3
+    let iterations = backend.isGPU ? 50 : 3
     let start = ContinuousClock.now
     for _ in 0..<iterations { try device.dispatch(kernel, threads: batch, arguments: arguments) }
     try device.wait()
@@ -186,7 +188,7 @@ let q = (0..<(batch * n)).map { _ in rng.uniform(-Double.pi, Double.pi) }
 let goals = (0..<batch).map { _ in (rng.uniform(-1, 1), rng.uniform(-1, 1), rng.uniform(0, 1.5)) }
 
 checkReferenceJacobian(chain: chain, q: q)
-for backend in [Backend.cuda, .cpu] {
+for backend in [Backend.gpu, .cpu] {
     do {
         try runChainFK(backend: backend, chain: chain, q: q, goals: goals, batch: batch)
     } catch {
@@ -198,7 +200,7 @@ for backend in [Backend.cuda, .cpu] {
 // A device created on one thread must work from another (the viewer serves requests on worker threads).
 do {
     // No cache: the worker thread must really compile (Slang recursion on a small worker stack).
-    let device = try ComputeDevice(backend: .cuda, searchPaths: [kernelDir, repoRoot + "/Kernels"], cacheDirectory: nil)
+    let device = try ComputeDevice(backend: .gpu, searchPaths: [kernelDir, repoRoot + "/Kernels"], cacheDirectory: nil)
     nonisolated(unsafe) var loaded: Result<Kernel, Error>?
     DispatchQueue.global().sync {
         loaded = Result {
@@ -228,11 +230,11 @@ do {
         }
     }
     let p = try result.get()
-    print("[cuda] cross-thread compile + dispatch: end effector \(p)")
+    print("[\(Backend.gpu)] cross-thread compile + dispatch: end effector \(p)")
     expect(abs(p[0]) < 1e-5 && abs(p[1] - 1) < 1e-5, "cross-thread result \(p)")
 } catch {
     failures += 1
-    print("  FAIL: [cuda] cross-thread dispatch: \(error)")
+    print("  FAIL: [\(Backend.gpu)] cross-thread dispatch: \(error)")
 }
 
 if failures > 0 {

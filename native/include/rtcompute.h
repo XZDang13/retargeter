@@ -32,6 +32,7 @@ typedef enum rtc_status {
 typedef enum rtc_backend {
     RTC_BACKEND_CPU = 1,
     RTC_BACKEND_CUDA = 2,
+    RTC_BACKEND_METAL = 3,
 } rtc_backend;
 
 typedef struct rtc_device_desc {
