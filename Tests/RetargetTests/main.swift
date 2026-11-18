@@ -751,6 +751,11 @@ test("[custom] SOMA walk through the generic path tracks and finds contacts like
     }
     print("  foot contact agreement \(format(100 * Double(agree) / Double(total))) %")
     expect(Double(agree) > 0.95 * Double(total), "the capsule feet find the same contacts")
+    // A walk touches the ground with the feet only (a shin capsule reaching down to the ankle once "touched" whenever
+    // the foot was planted).
+    let legs = ["left_shin", "right_shin", "left_knee", "right_knee"].map { b.contacts.groupNames.firstIndex(of: $0)! }
+    let legFrames = (0..<b.contacts.frameCount).filter { f in legs.contains { b.contacts.contact(f, $0) } }.count
+    expect(legFrames == 0, "no shin or knee contact while walking (\(legFrames) frames)")
     // Sole tilt of the robot feet while the person's heel and toe both touch.
     func tilt(_ r: RetargetResult, _ h: HumanRetargeter) -> Double {
         var angles: [Double] = []

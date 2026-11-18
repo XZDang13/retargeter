@@ -276,7 +276,11 @@ public enum CustomBody {
             let toe = index(s, S + "ToeBase"), arm = index(s, S + "Arm"), forearm = index(s, S + "ForeArm")
             let hand = index(s, S + "Hand")
             capsule(p(S + "Leg"), p(S + "Shin"), r("thigh"), r("knee"), leg) { _ in g("\(side)_thigh") }
-            capsule(p(S + "Shin"), p(S + "Foot"), r("knee"), r("ankle"), shin) { $0 < 0.35 ? g("\(side)_knee") : g("\(side)_shin") }
+            // The shin stops 15 % above the ankle (the foot box covers the ankle, as the foot's skinning does on the SOMA
+            // mesh): run down to the ankle, its lower cap sat at the limb contact height and the shin "touched" the
+            // ground whenever the foot was planted.
+            let ankleTop = p(S + "Shin") + 0.85 * (p(S + "Foot") - p(S + "Shin"))
+            capsule(p(S + "Shin"), ankleTop, r("knee"), r("ankle"), shin) { $0 < 0.4 ? g("\(side)_knee") : g("\(side)_shin") }
             capsule(p(S + "Arm"), p(S + "ForeArm"), r("upper_arm"), r("elbow"), arm) { _ in g("\(side)_upper_arm") }
             capsule(p(S + "ForeArm"), p(S + "Hand"), r("elbow"), r("wrist"), forearm) {
                 $0 < 0.3 ? g("\(side)_elbow") : $0 > 0.85 ? g("\(side)_hand") : g("\(side)_forearm")

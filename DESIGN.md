@@ -1021,7 +1021,8 @@ the config says which joints of the skeleton those are.
   and limb scales then come from this pose exactly as from the baked SOMA T-pose.
 - **Body** (`CustomBody.capsules`): ~15k points on capsules around the bones (rings ~1.5 cm apart; radii for a
   1.75 m person, scaled by the skeleton's height) and boxes for the feet (sole flat 2.5 cm below the toe joint,
-  heel 6 cm behind the ankle, to the toe End Site), each point rigidly on one joint and labelled with one of the
+  heel 6 cm behind the ankle, to the toe End Site; the shin capsule stops 15 % above the ankle, else its cap sat at
+  the limb contact height and planted feet read as shin contacts), each point rigidly on one joint and labelled with one of the
   standard contact groups (heel, toe, knee, shin, thigh, hand, elbow, forearm, upper arm, pelvis, torso, head), so
   contact analysis, the validator and the solver's contact terms run unchanged.
 - **Checked** on a SOMA clip read as a custom skeleton (RetargetTests `[custom]`): reference within 0.7° (pelvis),
