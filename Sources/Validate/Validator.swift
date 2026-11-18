@@ -181,6 +181,9 @@ public struct Validator: Sendable {
     public var dynamics: RobotDynamics
     /// Ground friction coefficient from the robot config (reject config parameter `friction` overrides).
     public var robotFriction: Double
+    /// Links carrying a hand (their meshes include one: the rubber hands of the G1), whose ground contact is a small
+    /// patch (`dynamics_hand_contact_radius`).
+    public var handLinks: Set<Int>
 
     public init(config: RejectConfig, robot: RobotModel, geometry: RobotGeometry, robotConfig: JSONValue?) {
         self.config = config
@@ -196,6 +199,7 @@ public struct Validator: Sendable {
         accelerationOverrides = set
         accelerationLimits = (0..<robot.dofCount).map { set[$0] ?? derived[$0] }
         robotFriction = robotConfig?["friction"]?.double ?? 0.8
+        handLinks = Set(robot.links.indices.filter { robot.links[$0].visuals.contains { $0.mesh.contains("hand") } })
     }
 
     // MARK: Human stage

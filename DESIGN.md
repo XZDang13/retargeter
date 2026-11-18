@@ -437,6 +437,8 @@ truth):
 | collision | self-collision penetration (capsules)                       | 2 / 2.5 cm          |
 | dynamics  | unexplained wrench, held 0.1 s (supported; in flight)       | 0.25 / 0.30; 0.40 / 0.50 |
 | dynamics  | ZMP outside the support, held 0.3 s                         | 6 / 8 cm            |
+| dynamics  | weight on the hands (fingertip patch), held 0.1 s           | 0.5 / ≥ 0.7 mg      |
+| dynamics  | wrist torque over effort limit, held 50 ms                  | recorded, not judged |
 | dynamics  | torque over effort limit, held 50 ms                        | recorded, not judged |
 | boundary  | start tilt; end stability margin                            | warn only           |
 
@@ -996,6 +998,22 @@ retargeter/
   in flight 0.40 / 0.50; ZMP 0.06 / 0.08; acceleration ratio 1.0 / 1.25; velocity: any frame over warns, a peak
   ratio over 1.25 rejects). Discrete errors still reject. On the existing BONES-SEED metrics: 29 DoF 121,061 ->
   127,335 accepted (93.0 %), 23 DoF 121,567 -> 126,214 (92.2 %); the four LAFAN results are accepted with warnings.
+- Hand support (2026-11-18; user: hand-supported motions such as handstands pass but are infeasible: the rubber hand
+  touches with its fingertips, too small to balance on, and the wrists, 5 Nm in pitch / yaw, cannot hold the body).
+  Reference: the fbdistill test split (11,828 clips; a tracking policy fails 13 throughout, 11 of them hand-supported:
+  9 burpees, 2 handstands). The validator took each link's ±x/±y extreme points near the floor as contact corners,
+  which gave a lying hand a 13 cm patch and 8-16 cm levers on the wrist; a hand link (one whose meshes include a hand)
+  now bears on a 1.5 cm patch around its lowest point (`dynamics_hand_contact_radius`). New metrics `hand_load_max`
+  (share of mg on the hands, held 0.1 s) and `wrist_torque_ratio_max`. On the 719 test clips that load a hand:
+  hand load separates best (AUC 0.98; failing 0.70-1.17 mg, tracked p90 0.57); wrist torque does not (2.5-5.2x in
+  the failing clips, but over 2.5x in 246 of 706 tracked ones: sitting with the arms behind / in front, whose
+  references are as infeasible but which the policy tracks by moving the load off the hands); the fingertip patch
+  barely moves the handstand's ZMP (6 cm: the two hands make a long thin support). Rule: warn above 0.5 mg, reject
+  from 0.70 mg (bound 0.69 with the two-digit rounding: one burpee is at 0.699): 11 / 11 failing clips rejected, 33
+  of 706 tracked (32 sitting-with-arms, one all-fours turn now at residual 0.31). Found on the way: the G1 23-DoF
+  rubber hands loaded without geometry (their mesh is only a collision mesh in the USD, which the loader skipped as a
+  copy of a visual), so its hands never touched, penetrated or collided in any check; collision-only meshes are now
+  the link's visual. The longer-term fix is in the solver: hand support through a straight wrist, fist down.
 
 ## 15. Open questions
 

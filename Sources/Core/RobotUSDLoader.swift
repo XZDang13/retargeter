@@ -91,6 +91,9 @@ public enum RobotUSDLoader {
 
     /// Collision primitives and visual mesh instances below a link (stopping at child links).
     private static func collectShapes(of linkPrim: USDPrim, linkIndex: Int, instances: USDLayer, links: inout [Link]) {
+        // Collision meshes are copies of visual meshes ("<mesh>_1"), except where a mesh is only a collision mesh (the
+        // G1 23-DoF rubber hands): those are the link's visual too, else the link has no geometry at all.
+        var collisionMeshes: [Visual] = []
         func walk(_ prim: USDPrim, origin: Transform) {
             for child in prim.children {
                 if child.typeName == "Xform" && (child.apiSchemas.contains("PhysicsRigidBodyAPI")) { continue }
@@ -106,17 +109,19 @@ public enum RobotUSDLoader {
                     let path = String(reference[reference.index(after: open)...].dropLast())
                     guard let instance = instances.prim(at: path) else { continue }
                     let isCollision = instance.children.contains { $0.apiSchemas.contains("PhysicsCollisionAPI") }
-                    guard !isCollision else { continue }
                     let mesh = instance.references.compactMap { ref -> String? in
                         guard let slash = ref.lastIndex(of: "/") else { return nil }
                         return String(ref[ref.index(after: slash)...].dropLast())
                     }.first ?? instance.name
-                    links[linkIndex].visuals.append(Visual(name: child.name, mesh: mesh, origin: childOrigin))
+                    let visual = Visual(name: child.name, mesh: mesh, origin: childOrigin)
+                    if isCollision { collisionMeshes.append(visual) } else { links[linkIndex].visuals.append(visual) }
                 }
                 if child.typeName == "Xform" && child.references.isEmpty { walk(child, origin: childOrigin) }
             }
         }
         walk(linkPrim, origin: .identity)
+        let meshes = Set(links[linkIndex].visuals.map(\.mesh))
+        links[linkIndex].visuals += collisionMeshes.filter { !meshes.contains($0.mesh) }
     }
 
     private static func collisionShape(_ prim: USDPrim) -> CollisionShape? {

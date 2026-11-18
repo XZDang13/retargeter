@@ -52,6 +52,15 @@ test("geometry") {
     print("  \(validator.geometry.collisionPairs.count) self-collision pairs; soles \(validator.geometry.soles.map { $0.points.count })")
     expect(validator.geometry.soles.count == 2 && validator.geometry.soles.allSatisfy { $0.points.count == 4 }, "two soles, four points each")
     expect(validator.geometry.collisionPairs.count > 50, "collision pairs")
+    // The rubber hands (small contact patch, hand load): on the wrist-yaw links of the 29-DoF, links of their own on the
+    // 23-DoF (whose hand mesh is only a collision mesh in the USD, so it used to load without geometry).
+    let names = validator.handLinks.map { robot.links[$0].name }.sorted()
+    expect(names == ["left_wrist_yaw_link", "right_wrist_yaw_link"], "hand links: \(names)")
+    let g23 = repositoryRoot + "/assets/robots/unitree_g1/g1_23_dof"
+    let robot23 = try RobotUSDLoader.load(directory: g23, name: "g1_23dof")
+    let hands23 = try Validator.load(repository: repositoryRoot, robot: robot23, robotDirectory: g23).handLinks
+    expect(hands23.count == 2 && hands23.allSatisfy { robot23.links[$0].name.contains("rubber_hand") },
+           "23-DoF hand links: \(hands23.map { robot23.links[$0].name })")
 }
 
 test("standing still is clean") {
@@ -62,6 +71,8 @@ test("standing still is clean") {
     expect(r.metric("self_collision_max")! <= 0.005, "no self-collision")
     expect(r.metric("foot_skate_p95")! < 1e-6, "no skate")
     expect(r.metric("end_stability_margin")! > 0.02, "CoM well inside the feet")
+    expect(r.metric("hand_load_max") == 0, "no load on the hands")
+    expect(r.metric("wrist_torque_ratio_max")! < 0.1, "wrists idle")
 }
 
 test("defects are detected") {

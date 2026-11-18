@@ -70,7 +70,16 @@
     { "metric": "zmp_outside_max",             "max": 0.06,  "severity": "warn" },
     { "metric": "zmp_outside_max",             "max": 0.08,  "severity": "reject" },
     { "metric": "joint_acc_ratio_max",         "max": 1.0,   "severity": "warn" },
-    { "metric": "joint_acc_ratio_max",         "max": 1.25,  "severity": "reject" }
+    { "metric": "joint_acc_ratio_max",         "max": 1.25,  "severity": "reject" },
+    // Hand support: share of the weight on the hands (held 0.1 s; a hand bears on a 1.5 cm patch at its fingertips,
+    // dynamics_hand_contact_radius). The rubber hands cannot balance the body on that patch, and the wrists (5 Nm in
+    // pitch / yaw) cannot hold it: test-split clips a tracking policy failed throughout (9 burpees, 2 handstands)
+    // carry 0.70-1.17 mg on the hands; tracked clips p90 0.57. Rejects from 0.70 mg (0.699 rounds to 0.70 > 0.69);
+    // it also takes 32 of 706 tracked hand-support clips (sitting with the arms behind / in front), which the policy
+    // tracks only by moving the load off the hands. Wrist torque (wrist_torque_ratio_max) is recorded, not judged:
+    // over 2.5x it would take 246 tracked clips.
+    { "metric": "hand_load_max",               "max": 0.5,   "severity": "warn" },
+    { "metric": "hand_load_max",               "max": 0.69,  "severity": "reject" }
   ],
   // Parameters of the metrics themselves.
   "parameters": {
@@ -92,6 +101,8 @@
     "dynamics_contact_speed": 0.5,
     "dynamics_smoothing": 0.02,
     "dynamics_moment_scale": 0.1,
+    // Radius (m) of a hand's contact patch around its lowest point.
+    "dynamics_hand_contact_radius": 0.015,
     "dynamics_residual_window": 0.1,
     "dynamics_zmp_window": 0.3,
     "dynamics_torque_window": 0.05

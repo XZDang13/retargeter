@@ -24,12 +24,22 @@ extension Validator {
         let height = config.parameter("dynamics_contact_height", 0.02)
         let speed = config.parameter("dynamics_contact_speed", 0.5)
         let touch = config.parameter("dynamics_contact_touch", 0.005)
+        let handRadius = config.parameter("dynamics_hand_contact_radius", 0.015)
         var out: [ContactPoint] = []
         for (l, points) in geometry.linkPoints.enumerated() {
             var near: [(local: Vec3, world: Vec3)] = []
             for p in points {
                 let w = world[l].apply(p)
                 if w.z < height { near.append((p, w)) }
+            }
+            // A rubber hand bears on a small patch around its lowest point (its fingertips when flat), not on the
+            // corners of everything near the floor: those gave a lying hand a 13 cm patch (support it does not have)
+            // and its force a lever of up to 16 cm on the wrist.
+            if handLinks.contains(l), let lowest = near.min(by: { $0.world.z < $1.world.z }) {
+                near = near.filter { p in
+                    let d = p.world - lowest.world
+                    return (d.x * d.x + d.y * d.y).squareRoot() <= handRadius
+                }
             }
             if let foot = geometry.soles.first(where: { $0.link == l }) {
                 for p in foot.points {
@@ -170,6 +180,15 @@ extension Validator {
         report.record("torque_ratio_peak", peak)
         report.record("torque_over_limit_frames", Double(over.filter { $0 }.count))
         report.record("contact_force_peak", peakForce)
+        // Hand support: the share of the weight on the hands, and the wrist torques it costs (held like the others).
+        if !handLinks.isEmpty {
+            let handLoad = trace.contactForce.map { links in handLinks.reduce(0.0) { $0 + max(0, links[$1].z) } / mg }
+            report.record("hand_load_max", sustained(handLoad, window: residualWindow))
+        }
+        let wrists = (0..<n).filter { robot.dofNames[$0].contains("wrist") }
+        if !wrists.isEmpty {
+            report.record("wrist_torque_ratio_max", wrists.map { sustained(ratio[$0], window: torqueWindow) }.max()!)
+        }
         report.dynamics = trace
     }
 
