@@ -415,7 +415,7 @@ Human-side pre-filter:
 | metric                                                    | default threshold        | source        |
 |-----------------------------------------------------------|--------------------------|---------------|
 | `env_contact` / `env_support` (§5a)                       | any                      | ours          |
-| unexplained unsupported time (§5a)                        | > 0.5 s (warn > 0)       | ours          |
+| unexplained unsupported time (§5a)                        | warn > 0 (no reject)     | ours          |
 | human penetration below the local floor (§5a)             | feet 4 cm, body 8 cm, ≥ 25 ms | ours     |
 | root jerk                                                 | > 50 m/s³                | PHUMA         |
 | CoM–CoP / support distance                                | > 0.1 m for > 100 frames, or at first/last frame | PBHC |
@@ -980,8 +980,19 @@ retargeter/
   vertical" leaned the robot back 5° on a walk (lumbar curve; now the captured pelvis, 0.7° from the baked one).
   Arms are raised from hanging (down, then out about the forward axis) and the frame choice prefers hanging
   hands: a minimal swing from wherever the arm was gave up to 59° of arm twist (now 14°).
+- Human `unsupported_seconds` demoted to a warning (2026-11-18, user's call). MJ_Zombie / Monastery (generated, LAFAN
+  skeleton) were rejected for 1.13 / 1.9 s unsupported: the zombie stands on one foot with its CoM 15-19 cm outside
+  it, Monastery's accelerations put the ZMP 50-68 cm outside the feet; the generated capsule body reports 0 s on 10
+  SOMA clips, as the baked one does, so the estimate is not the cause. Yet a tracking policy completed both in
+  sim2sim (root height error < 5 cm, body error 2-5 cm root-relative). The rule judges the source, the solver
+  changes the motion, and the robot's own support is checked by `dyn_residual_max` / `zmp_outside_max`. It was the
+  only reason for 32 (29 DoF) / 47 (23 DoF) BONES-SEED rejects. The user suspects the human check itself; open (§15).
 
 ## 15. Open questions
+
+- Human support check (2026-11-18): `unsupported_seconds` flagged two generated clips a policy tracks (§14, demoted to
+  a warning). Whether the point-mass ZMP from surface-group centroids (de Leva fractions, ±50 ms accelerations) is
+  too strict, or such clips are only trackable because the robot motion differs, is not settled.
 
 - Arm problems (2026-10-27; jump_right fixed 2026-10-28 by the branch switch, §14): jump_right_003__A030 falls into a shoulder gimbal branch (right
   shoulder roll −2.22, yaw 2.57, both at their limits, 1.4 – 3.4 s, then snaps at 3.58 s; elbow up to 14 cm off,

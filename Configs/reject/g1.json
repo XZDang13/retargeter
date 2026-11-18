@@ -11,8 +11,10 @@
     // explains), in seconds so it does not depend on the source rate. Brief excursions are possible for a real
     // person and a robot alike (the point-mass ZMP is only an estimate); after the contact fixes the 128-clip sample
     // has none outside a box clip, and the leftovers in box / stairs / chair clips are 0.03-0.53 s.
+    // A warning only (2026-11-18): it judges the source person, and generated clips flagged for 1.1-1.9 s (MJ_Zombie,
+    // Monastery) tracked fine in sim2sim; the retargeted motion's own support is judged on the robot (dyn_residual,
+    // zmp_outside). It was the only reason for 32 / 47 BONES-SEED rejects (29 / 23 DoF).
     { "metric": "unsupported_seconds",    "max": 0,    "severity": "warn", "precision": 0.01 },
-    { "metric": "unsupported_seconds",    "max": 0.5,  "severity": "reject" },
     // Frames with a part below the local floor (feet 4 cm, limbs / trunk 8 cm; ContactConfig) for >= 25 ms.
     { "metric": "penetration_frames",     "max": 0,    "severity": "reject" },
     { "metric": "ground_tilt_deg",        "max": 2,    "severity": "warn" },
