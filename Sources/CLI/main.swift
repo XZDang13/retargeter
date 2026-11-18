@@ -1,6 +1,7 @@
 // retarget — command-line entry point. Milestone 1: `retarget view`.
 
 import Core
+import Retarget
 import Viewer
 
 #if canImport(Glibc)
@@ -11,8 +12,10 @@ import Darwin
 
 let usage = """
 usage: retarget <command> [options]
-  view [--port N] [--motions DIR]   serve the browser viewer on http://127.0.0.1:N (default 8080);
-                                    --motions: human BVH root (default $SOMA_BVH_ROOT or ~/Downloads/soma_uniform/bvh)
+  view [--port N] [--motions DIR] [--skeleton FILE]
+                                    serve the browser viewer on http://127.0.0.1:N (default 8080);
+                                    --motions: human BVH root (default $SOMA_BVH_ROOT or ~/Downloads/soma_uniform/bvh);
+                                    --skeleton: custom skeleton config for the clips (e.g. Configs/skeletons/lafan1.json)
   realtime <inputs>... [options]    batch-retarget BVH files with the causal solver (see retarget realtime --help)
   offline <inputs>... [options]     batch-retarget with the whole-trajectory solver (same options)
   validate <files>... --human DIR   validate robot motions (.npz / soma-retargeter .csv) against their source clips
@@ -38,11 +41,12 @@ case "view":
         exit(1)
     }
     let home = getenv("HOME").map { String(cString: $0) } ?? ""
-    let config = ViewerConfiguration(repositoryRoot: root,
+    var config = ViewerConfiguration(repositoryRoot: root,
                                      motionRoot: option("--motions") ?? getenv("SOMA_BVH_ROOT").map { String(cString: $0) }
                                          ?? home + "/Downloads/soma_uniform/bvh",
                                      port: UInt16(option("--port") ?? "8080") ?? 8080)
     do {
+        if let file = option("--skeleton") { config.skeleton = try SkeletonConfig.load(file: file) }
         try ViewerApp(config: config).run()
     } catch {
         print("error: \(error)")

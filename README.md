@@ -67,8 +67,9 @@ config that names their joints (DESIGN §16); `Configs/skeletons/lafan1.json` is
 build/release/retarget offline my_clips/ --skeleton Configs/skeletons/lafan1.json --out out_lafan
 ```
 
-The reference pose comes from a standing frame of the clips and the contact body is generated from the bones; the
-viewer, `validate` and `teleop` still take SOMA clips only.
+The reference pose comes from a standing frame of the clips and the contact body is generated from the bones. The
+viewer takes the same option (`retarget view --motions my_clips --skeleton Configs/skeletons/lafan1.json`; the generated
+body shows as points); `validate` and `teleop` still take SOMA clips only.
 
 Validate trajectories from any tool (our `.npz`, NVIDIA soma-retargeter `.csv`) against their source clips:
 

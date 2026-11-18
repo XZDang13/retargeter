@@ -71,6 +71,18 @@ public struct SkeletonConfig: Sendable {
         return options
     }
 
+    /// Identity of a skeleton (joint names, hierarchy and bone lengths), as a short key: clips with the same key share
+    /// a reference pose and body.
+    public static func signature(_ skeleton: HumanSkeleton) -> String {
+        var h: UInt64 = 1_469_598_103_934_665_603
+        func mix(_ s: String) { for b in s.utf8 { h = (h ^ UInt64(b)) &* 1_099_511_628_211 } }
+        for j in 0..<skeleton.jointCount {
+            let o = skeleton.restOffsets[j]
+            mix("\(skeleton.jointNames[j]) \(skeleton.parents[j] ?? -1) \(Int((o.x * 1e4).rounded())) \(Int((o.y * 1e4).rounded())) \(Int((o.z * 1e4).rounded()));")
+        }
+        return String(h, radix: 16)
+    }
+
     /// Reader options that only fix units and basis (for reading a file's own joint names).
     public var rawOptions: BVHOptions {
         var options = BVHOptions()

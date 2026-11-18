@@ -1027,5 +1027,9 @@ the config says which joints of the skeleton those are.
 - **Checked** on a SOMA clip read as a custom skeleton (RetargetTests `[custom]`): reference within 0.7° (pelvis),
   1.3° (chest), 6° (legs), 2° (feet), 14° (upper arm twist) of the baked one; a walk tracks 1.1 cm (baked 1.6 cm)
   with identical foot contacts, robot root within 0.3 cm and pelvis within 3° of the baked path, soles flat (0.1°).
-- **Not yet:** the viewer, `validate` and `teleop` still assume the SOMA skeleton.
+- **Viewer** (`retarget view --skeleton FILE`): each skeleton gets its own context (options, body, contact groups,
+  GPU skinning and retargeters), built the first time one of its clips is opened (the first retarget of a new
+  skeleton compiles its solvers: a few seconds). The browser loads a clip's body by its skeleton key and draws a
+  generated body as points; a motion root holding clips directly lists as ".".
+- **Not yet:** `validate` and `teleop` still assume the SOMA skeleton.
 

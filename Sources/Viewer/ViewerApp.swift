@@ -20,29 +20,55 @@ public struct ViewerConfiguration: Sendable {
     /// Root directory of human motion files (e.g. ~/Downloads/soma_uniform/bvh); requests cannot leave it.
     public var motionRoot: String
     public var port: UInt16
+    /// Custom skeleton config (Configs/skeletons, DESIGN §16); nil: SOMA clips and the baked body surface.
+    public var skeleton: SkeletonConfig?
 
-    public init(repositoryRoot: String, motionRoot: String, port: UInt16) {
+    public init(repositoryRoot: String, motionRoot: String, port: UInt16, skeleton: SkeletonConfig? = nil) {
         self.repositoryRoot = repositoryRoot
         self.motionRoot = motionRoot
         self.port = port
+        self.skeleton = skeleton
+    }
+}
+
+/// One human skeleton: how its files are read, its body surface and contact groups, and (with a GPU) its skinning
+/// and retargeters, built on first use. SOMA: one, from the baked surface; custom skeletons: one per distinct
+/// skeleton, its reference pose and body built from the first clip of it that is opened.
+final class SkeletonContext: @unchecked Sendable {
+    let key: String
+    let options: BVHOptions
+    /// nil: SOMA without its rig file (the body shows, retargeting is unavailable).
+    let skeleton: HumanSkeleton?
+    let surface: BodySurface
+    let groups: ContactGroups
+    // Under `ViewerApp.gpu`'s lock:
+    var skinning: SurfaceSkinning?
+    var retargeters: [String: HumanRetargeter] = [:]  // per robot
+    var offline: [String: OfflineRetargeter] = [:]
+
+    init(key: String, options: BVHOptions, skeleton: HumanSkeleton?, surface: BodySurface) throws {
+        self.key = key
+        self.options = options
+        self.skeleton = skeleton
+        self.surface = surface
+        groups = try ContactGroups.of(surface)
     }
 }
 
 public final class ViewerApp: Sendable {
     let config: ViewerConfiguration
     let robots: [(name: String, model: RobotModel)]
-    let surface: BodySurface?
-    let contactGroups: ContactGroups?
-    /// GPU skinning for contact analysis; slang-rhi devices are not thread-safe, so requests take turns.
+    /// The SOMA skeleton (nil with a custom skeleton config, or without the baked surface).
+    let soma: SkeletonContext?
+    /// Custom skeletons seen so far, by `SkeletonConfig.signature`.
+    let contexts: Mutex<[String: SkeletonContext]>
+    /// GPU skinning and retargeting; slang-rhi devices are not thread-safe, so requests take turns.
     let gpu: Mutex<GPUState?>
 
     final class GPUState {
         let device: ComputeDevice
-        let skinning: SurfaceSkinning
-        var retargeters: [String: HumanRetargeter] = [:]  // per robot
         var validators: [String: Validator] = [:]
-        var offline: [String: OfflineRetargeter] = [:]
-        init(device: ComputeDevice, skinning: SurfaceSkinning) { self.device = device; self.skinning = skinning }
+        init(device: ComputeDevice) { self.device = device }
     }
 
     public init(config: ViewerConfiguration) throws {
@@ -51,38 +77,80 @@ public final class ViewerApp: Sendable {
         robots = try [("g1_29dof", "g1_29_dof"), ("g1_23dof", "g1_23_dof")].map {
             ($0.0, try RobotUSDLoader.load(directory: g1 + "/" + $0.1, name: $0.0))
         }
-        let surface = try? BodySurface.load(file: config.repositoryRoot + "/assets/body_models/soma/surface_lo.npz")
-        self.surface = surface
-        contactGroups = surface.flatMap { try? ContactGroups.of($0) }
-        var state: GPUState?
-        if let surface, let device = try? ComputeDevice.makeDefault(backend: .gpu),
-           let skinning = try? SurfaceSkinning(device: device, surface: surface) {
-            state = GPUState(device: device, skinning: skinning)
-            // Build the retargeters (and compile their kernels) here on the main thread: Slang compilation
-            // on a request thread's small stack is not safe.
+        contexts = Mutex([:])
+        var soma: SkeletonContext?
+        if config.skeleton == nil, let surface = try? BodySurface.load(file: config.repositoryRoot + "/assets/body_models/soma/surface_lo.npz") {
             let rig = config.repositoryRoot + "/assets/body_models/soma/seed_soma_shapes/soma_base_rig/soma_base_skel_minimal.bvh"
-            if let skeleton = try? BVH.load(file: rig).skeleton {
+            soma = try? SkeletonContext(key: "soma", options: BVHOptions(), skeleton: try? BVH.load(file: rig).skeleton,
+                                        surface: surface)
+        }
+        self.soma = soma
+        var state: GPUState?
+        if let device = try? ComputeDevice.makeDefault(backend: .gpu) {
+            state = GPUState(device: device)
+            for (name, model) in robots {
+                let directory = config.repositoryRoot + "/assets/robots/unitree_g1/" + (name == "g1_29dof" ? "g1_29_dof" : "g1_23_dof")
+                state?.validators[name] = try? Validator.load(repository: config.repositoryRoot, robot: model, robotDirectory: directory)
+            }
+            // SOMA's retargeters up front (their kernels compile once; later skeletons reuse them).
+            if let soma, soma.skeleton != nil {
                 for (name, model) in robots {
-                    do {
-                        let mapping = try RetargetMapping.load(file: config.repositoryRoot + "/Configs/mappings/soma77_\(name).json")
-                        state?.retargeters[name] = try HumanRetargeter(device: device, robot: model, mapping: mapping,
-                                                                       surface: surface, skeleton: skeleton)
-                        let directory = config.repositoryRoot + "/assets/robots/unitree_g1/" + (name == "g1_29dof" ? "g1_29_dof" : "g1_23_dof")
-                        state?.validators[name] = try Validator.load(repository: config.repositoryRoot, robot: model,
-                                                                     robotDirectory: directory)
-                        state?.offline[name] = try OfflineRetargeter(
-                            device: device, robot: model, mapping: mapping, surface: surface, skeleton: skeleton,
-                            geometry: try RobotGeometry(robot: model, pointsFile: directory + "/mesh_points.npz"))
-                    } catch { print("viewer: no retargeting for \(name): \(error)") }
+                    do { try Self.prepareGPU(soma, robot: name, model: model, device: device, repository: config.repositoryRoot) }
+                    catch { print("viewer: no retargeting for \(name): \(error)") }
                 }
             }
         }
         gpu = Mutex(state)
     }
 
+    /// Skinning and the retargeters of `context` for one robot (GPU lock held).
+    static func prepareGPU(_ context: SkeletonContext, robot name: String, model: RobotModel, device: ComputeDevice,
+                           repository: String) throws {
+        if context.skinning == nil { context.skinning = try SurfaceSkinning(device: device, surface: context.surface) }
+        guard context.retargeters[name] == nil else { return }
+        guard let skeleton = context.skeleton else {
+            throw ComputeError(message: "retargeting needs the SOMA rig (assets/body_models/soma/seed_soma_shapes)")
+        }
+        let mapping = try RetargetMapping.load(file: repository + "/Configs/mappings/soma77_\(name).json")
+        let directory = repository + "/assets/robots/unitree_g1/" + (name == "g1_29dof" ? "g1_29_dof" : "g1_23_dof")
+        context.retargeters[name] = try HumanRetargeter(device: device, robot: model, mapping: mapping,
+                                                        surface: context.surface, skeleton: skeleton)
+        context.offline[name] = try OfflineRetargeter(
+            device: device, robot: model, mapping: mapping, surface: context.surface, skeleton: skeleton,
+            geometry: try RobotGeometry(robot: model, pointsFile: directory + "/mesh_points.npz"))
+    }
+
+    /// The skeleton a clip is read with (custom: built the first time a clip of that skeleton is opened).
+    func context(_ path: String) throws -> SkeletonContext {
+        guard let config = config.skeleton else {
+            guard let soma else { throw ComputeError(message: "no body surface (run ./setup.sh)") }
+            return soma
+        }
+        let raw = try BVH.loadSkeleton(file: path, options: config.rawOptions)
+        let key = SkeletonConfig.signature(raw)
+        if let known = contexts.withLock({ $0[key] }) { return known }
+        let options = try config.bvhOptions(for: raw)
+        let motion = try BVH.load(file: path, options: options)
+        let body = try CustomBody.make(motion, config: config)
+        let made = try SkeletonContext(key: key, options: options, skeleton: motion.skeleton, surface: body.surface)
+        print("viewer: skeleton \(key) (\(motion.skeleton.jointCount) joints) from \(path), reference frame \(body.frame)")
+        return contexts.withLock { known in
+            if let existing = known[key] { return existing }   // built meanwhile by another request
+            known[key] = made
+            return made
+        }
+    }
+
+    /// A clip read with its skeleton's options.
+    func load(_ path: String) throws -> (SkeletonContext, HumanMotion) {
+        let context = try context(path)
+        return (context, try BVH.load(file: path, options: context.options))
+    }
+
     public func run() throws -> Never {
         print("viewer: http://127.0.0.1:\(config.port)/  (motions from \(config.motionRoot))")
-        if surface == nil { print("viewer: no body surface (run tools/bake_soma_surface.py); skeleton only") }
+        if let skeleton = config.skeleton { print("viewer: custom skeleton \(skeleton.name): bodies generated per skeleton") }
+        else if soma == nil { print("viewer: no body surface (run ./setup.sh); skeleton only") }
         print("viewer: contact analysis on \(gpu.withLock { $0 == nil } ? "CPU (no GPU device)" : "GPU (\(Backend.gpu))")")
         let server = HTTPServer(port: config.port) { [self] request in self.handle(request) }
         try server.run()
@@ -106,7 +174,11 @@ public final class ViewerApp: Sendable {
             }
             return retarget(path, robot: robot, offline: request.query["mode"] == "offline")
         case "/api/dirs":
-            return .json(JSON.array(listDirectory(config.motionRoot).filter(\.isDirectory).map { .string($0.name) }).text)
+            // "." when the root itself holds clips.
+            let entries = listDirectory(config.motionRoot)
+            let dirs = (entries.contains { !$0.isDirectory && $0.name.hasSuffix(".bvh") } ? ["."] : [])
+                + entries.filter(\.isDirectory).map(\.name)
+            return .json(JSON.array(dirs.map { .string($0) }).text)
         case "/api/files":
             guard let dir = request.query["dir"], let path = safePath(dir) else { return .text("bad dir", status: 400) }
             let files = listDirectory(path).filter { !$0.isDirectory && $0.name.hasSuffix(".bvh") }.map { JSON.string($0.name) }
@@ -118,8 +190,13 @@ public final class ViewerApp: Sendable {
             guard let file = request.query["file"], let path = safePath(file) else { return .text("bad file", status: 400) }
             return contacts(path, causal: request.query["mode"] == "causal")
         case "/api/surface":
-            guard let surface else { return .notFound }
-            return surfacePayload(surface)
+            // The body of a clip's skeleton (`file`), or SOMA's.
+            if let file = request.query["file"] {
+                guard let path = safePath(file) else { return .text("bad file", status: 400) }
+                do { return surfacePayload(try context(path)) } catch { return .text("\(error)", status: 400) }
+            }
+            guard let soma else { return .notFound }
+            return surfacePayload(soma)
         default:
             if request.path.hasPrefix("/web/") { return file(config.repositoryRoot + "/Web/" + request.path.dropFirst(5)) }
             if request.path.hasPrefix("/robots/") {
@@ -196,8 +273,12 @@ public final class ViewerApp: Sendable {
     }
 
     func human(_ path: String) -> HTTPResponse {
-        let motion: HumanMotion
-        do { motion = try BVH.load(file: path) } catch { return .text("\(error)", status: 400) }
+        // Without a body (no SOMA surface) the skeleton still shows: read the clip plainly.
+        let skeleton: SkeletonContext?, motion: HumanMotion
+        do {
+            skeleton = config.skeleton == nil && soma == nil ? nil : try context(path)
+            motion = try BVH.load(file: path, options: skeleton?.options ?? BVHOptions())
+        } catch { return .text("\(error)", status: 400) }
         var pos: [Float] = [], rot: [Float] = []
         pos.reserveCapacity(motion.frameCount * motion.skeleton.jointCount * 3)
         rot.reserveCapacity(motion.frameCount * motion.skeleton.jointCount * 4)
@@ -210,7 +291,8 @@ public final class ViewerApp: Sendable {
         var payload = PackedPayload()
         payload.fields = [("kind", .string("human")), ("fps", .number(motion.fps)), ("frames", .number(Double(motion.frameCount))),
                           ("joints", .array(motion.skeleton.jointNames.map { .string($0) })),
-                          ("parents", .array(motion.skeleton.parents.map { $0.map { .number(Double($0)) } ?? .number(-1) }))]
+                          ("parents", .array(motion.skeleton.parents.map { $0.map { .number(Double($0)) } ?? .number(-1) })),
+                          ("body", skeleton.map { .string($0.key) } ?? .null)]
         payload.add("pos", floats: pos)
         payload.add("rot", floats: rot)
         return payload.response
@@ -218,24 +300,23 @@ public final class ViewerApp: Sendable {
 
     /// Realtime (lag = 0) retargeting of a clip onto `robot`; link poses at the source frame rate.
     func retarget(_ path: String, robot: RobotModel, offline: Bool) -> HTTPResponse {
-        guard let surface else { return .text("no body surface", status: 404) }
-        let motion: HumanMotion
-        do { motion = try BVH.load(file: path) } catch { return .text("\(error)", status: 400) }
-        _ = surface
+        let context: SkeletonContext, motion: HumanMotion
+        do { (context, motion) = try load(path) } catch { return .text("\(error)", status: 400) }
         let trajectory: RobotTrajectory
         var report = ValidationReport()
         do {
             trajectory = try gpu.withLock { state -> RobotTrajectory in
-                guard let retargeter = state?.retargeters[robot.name] else {
-                    throw ComputeError(message: "retargeting unavailable (needs a GPU and the body surface)")
-                }
+                guard let state else { throw ComputeError(message: "retargeting unavailable (needs a GPU)") }
+                try Self.prepareGPU(context, robot: robot.name, model: robot, device: state.device,
+                                    repository: config.repositoryRoot)
+                guard let retargeter = context.retargeters[robot.name] else { throw ComputeError(message: "no retargeter") }
                 let result: RetargetResult
-                if offline, let solver = state?.offline[robot.name] {
+                if offline, let solver = context.offline[robot.name] {
                     result = try solver.solve(try solver.prepare([motion]))[0]
                 } else {
                     result = try retargeter.retarget([motion])[0]
                 }
-                if let validator = state?.validators[robot.name] {
+                if let validator = state.validators[robot.name] {
                     report = validator.checkHuman(result.prepared, setup: retargeter.setup)
                     validator.checkRobot(result, setup: retargeter.setup, fps: 50, into: &report)
                 }
@@ -263,14 +344,17 @@ public final class ViewerApp: Sendable {
 
     /// Ground + contact analysis of a clip (offline or causal) for display.
     func contacts(_ path: String, causal: Bool) -> HTTPResponse {
-        guard let surface, let groups = contactGroups else { return .notFound }
-        let motion: HumanMotion
-        do { motion = try BVH.load(file: path) } catch { return .text("\(error)", status: 400) }
+        let context: SkeletonContext, motion: HumanMotion
+        do { (context, motion) = try load(path) } catch { return .text("\(error)", status: 400) }
+        let surface = context.surface, groups = context.groups
         let world = (0..<motion.frameCount).map { motion.globalTransforms(frame: $0) }
         let positions: [SIMD3<Float>]
         do {
             positions = try gpu.withLock { state -> [SIMD3<Float>] in
-                if let state { return try state.skinning.skin(world: world) }
+                if let state {
+                    if context.skinning == nil { context.skinning = try SurfaceSkinning(device: state.device, surface: surface) }
+                    return try context.skinning!.skin(world: world)
+                }
                 return world.flatMap { surface.skin(world: $0).map { SIMD3(Float($0.x), Float($0.y), Float($0.z)) } }
             }
         } catch { return .text("\(error)", status: 500) }
@@ -295,10 +379,11 @@ public final class ViewerApp: Sendable {
         return payload.response
     }
 
-    func surfacePayload(_ s: BodySurface) -> HTTPResponse {
+    func surfacePayload(_ context: SkeletonContext) -> HTTPResponse {
+        let s = context.surface
         var payload = PackedPayload()
         payload.fields = [("vertices", .number(Double(s.vertexCount))), ("influences", .number(Double(s.influences))),
-                          ("joints", .array(s.jointNames.map { .string($0) }))]
+                          ("joints", .array(s.jointNames.map { .string($0) })), ("body", .string(context.key))]
         payload.add("rest", floats: s.restVertices.flatMap { [Float($0.x), Float($0.y), Float($0.z)] })
         let inverseBind = s.bind.map(\.inverse)
         payload.add("invBindPos", floats: inverseBind.flatMap { [Float($0.translation.x), Float($0.translation.y), Float($0.translation.z)] })
@@ -306,7 +391,8 @@ public final class ViewerApp: Sendable {
         payload.add("weightJoints", ints: s.weightJoints)
         payload.add("weightValues", floats: s.weightValues)
         payload.add("triangles", ints: s.triangles.flatMap { [$0.x, $0.y, $0.z] })
-        if let groups = contactGroups {
+        do {
+            let groups = context.groups
             var vertexGroup = [Int32](repeating: -1, count: s.vertexCount)
             for (g, members) in groups.vertices.enumerated() { for v in members { vertexGroup[v] = Int32(g) } }
             payload.fields.append(("groups", .array(groups.names.map { .string($0) })))

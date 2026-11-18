@@ -122,7 +122,8 @@ async function loadRobotMotion() {
     robot.motion = motion;
     const v = motion.header.validation;
     robot.verdict = v ? (v.status === 'accepted' ? 'robot: accepted' : `robot: REJECTED (${v.reasons.join('; ')})`) : '';
-    ui.status.textContent = `${previous} · ${robot.verdict}`;
+    // The status as it is now (the contacts may have finished meanwhile), without the retargeting note.
+    ui.status.textContent = `${ui.status.textContent.replace(/ · (robot: |retargeting onto ).*$/, '')} · ${robot.verdict}`;
   } else {
     const motion = await fetchPacked(`/api/robot_demo?name=${name}&demo=${kind}`);
     if (ui.robotMotion.value !== kind || ui.robot.value !== decodeURIComponent(name)) return; // superseded
@@ -151,7 +152,7 @@ function poseRobot(t) {
 // ---------------------------------------------------------------------------------------------
 // Human
 
-const human = { root: new THREE.Group(), motion: null, surface: null, skeleton: null, body: null, contacts: null, file: null };
+const human = { root: new THREE.Group(), motion: null, surface: null, bodyKey: null, skeleton: null, body: null, contacts: null, file: null };
 scene.add(human.root);
 
 // Contact display: estimated ground plane, ZMP marker, CoM ground projection.
@@ -172,7 +173,8 @@ const COLORS = {
 
 function buildSkeleton(header) {
   const pairs = [];
-  header.parents.forEach((p, j) => { if (p > 0) pairs.push(p, j); }); // skip the virtual Root (index 0)
+  // No bone from SOMA's virtual Root joint (other skeletons start at their hips).
+  header.parents.forEach((p, j) => { if (p >= 0 && header.joints[p] !== 'Root') pairs.push(p, j); });
   const geometry = new THREE.BufferGeometry();
   geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(pairs.length * 3), 3));
   const lines = new THREE.LineSegments(geometry, new THREE.LineBasicMaterial({ color: 0xe0592a, depthTest: false }));
@@ -189,16 +191,25 @@ function buildBody(surface) {
   const colors = new Float32Array(header.vertices * 3);
   for (let i = 0; i < header.vertices; i++) COLORS.skin.toArray(colors, 3 * i);
   geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-  geometry.setIndex(new THREE.BufferAttribute(new Uint32Array(blocks.triangles), 1));
-  const material = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.7, transparent: true, opacity: 0.85 });
-  const mesh = new THREE.Mesh(geometry, material);
-  mesh.frustumCulled = false;
-  return mesh;
+  let body;
+  if (blocks.triangles.length) {
+    geometry.setIndex(new THREE.BufferAttribute(new Uint32Array(blocks.triangles), 1));
+    body = new THREE.Mesh(geometry, new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.7, transparent: true, opacity: 0.85 }));
+  } else {
+    // Generated bodies (custom skeletons) are points on capsules, without triangles.
+    body = new THREE.Points(geometry, new THREE.PointsMaterial({ vertexColors: true, size: 0.012, transparent: true, opacity: 0.85 }));
+  }
+  body.frustumCulled = false;
+  return body;
 }
 
-async function loadSurface() {
-  try { human.surface = await fetchPacked('/api/surface'); } catch { human.surface = null; }
-  if (human.surface) { human.body = buildBody(human.surface); human.root.add(human.body); }
+/** The body of `file`'s skeleton (one per skeleton: SOMA's baked mesh, or a generated one for custom skeletons). */
+async function loadSurface(file, key) {
+  if (human.body) { human.root.remove(human.body); human.body = null; }
+  human.surface = null;
+  human.bodyKey = key;
+  try { human.surface = await fetchPacked(`/api/surface?file=${encodeURIComponent(file)}`); } catch { human.surface = null; }
+  if (human.surface && human.bodyKey === key) { human.body = buildBody(human.surface); human.root.add(human.body); }
 }
 
 async function loadHuman(file) {
@@ -211,6 +222,7 @@ async function loadHuman(file) {
   human.skeleton = buildSkeleton(motion.header);
   human.root.add(human.skeleton);
   human.motion = motion;
+  if (motion.header.body && motion.header.body !== human.bodyKey) await loadSurface(file, motion.header.body);
   const { frames, fps, joints } = motion.header;
   human.info = `${file}: ${frames} frames @ ${fps.toFixed(1)} fps, ${joints.length} joints`;
   focusHuman();
@@ -386,7 +398,7 @@ function poseHuman(t) {
       out[3 * i] = px; out[3 * i + 1] = py; out[3 * i + 2] = pz;
     }
     human.body.geometry.attributes.position.needsUpdate = true;
-    human.body.geometry.computeVertexNormals();
+    if (human.body.isMesh) human.body.geometry.computeVertexNormals();
     colorContacts(f);
   }
   poseContactMarkers(f);
@@ -522,7 +534,6 @@ async function init() {
   fillSelect(ui.robot, robots.map((r) => r.name));
   await loadRobot(ui.robot.value);
   await loadRobotMotion();
-  await loadSurface();
   const dirs = await fetchJSON('/api/dirs');
   if (dirs.length) {
     fillSelect(ui.dir, dirs, dirs.includes('230322') ? '230322' : dirs[0]);

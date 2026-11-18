@@ -150,8 +150,7 @@ struct RealtimeCommand {
         for file in todo {
             do {
                 let skeleton = try BVH.loadSkeleton(file: file.path, options: config.rawOptions)
-                let key = zip(skeleton.jointNames, skeleton.restOffsets).map { "\($0) \(format($1.x)) \(format($1.y)) \(format($1.z))" }
-                    .joined(separator: ";")
+                let key = SkeletonConfig.signature(skeleton)
                 if let g = groups.firstIndex(where: { $0.key == key }) { groups[g].files.append(file) }
                 else { groups.append((key, [file], skeleton)) }
             } catch {
