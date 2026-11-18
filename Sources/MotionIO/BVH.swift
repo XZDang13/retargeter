@@ -21,6 +21,9 @@ public struct BVHOptions: Sendable {
     /// Convert from the file's Y-up basis to our Z-up basis.
     public var yUp: Bool = true
     public var skeletonName: String = "soma77"
+    /// File joint name -> name in the motion (custom skeletons: their joints under the canonical names the mappings
+    /// use). Other joints keep their names unless one would collide, which gets the suffix "_src".
+    public var jointRenames: [String: String] = [:]
 
     public init() {}
 }
@@ -50,6 +53,21 @@ public enum BVH {
         guard read == size else { throw BVHError(message: "short read on \(file)") }
         buffer[size] = 0
         return try parse(buffer, options: options, source: file)
+    }
+
+    /// The skeleton of a file (its hierarchy only; the motion is not read).
+    public static func loadSkeleton(file: String, options: BVHOptions = BVHOptions()) throws -> HumanSkeleton {
+        guard let file_ = fopen(file, "rb") else { throw BVHError(message: "cannot open \(file)") }
+        defer { fclose(file_) }
+        var text: [CChar] = []
+        var line = [CChar](repeating: 0, count: 4096)
+        while fgets(&line, Int32(line.count), file_) != nil {
+            let piece = line.prefix { $0 != 0 }
+            text += piece
+            if String(decoding: piece.map { UInt8(bitPattern: $0) }, as: UTF8.self).contains("MOTION") { break }
+        }
+        text += Array("\nFrames: 0\nFrame Time: 1\n".utf8CString)
+        return try text.withUnsafeMutableBufferPointer { try parse($0.baseAddress!, options: options, source: file) }.skeleton
     }
 
     public static func parse(text: String, options: BVHOptions = BVHOptions()) throws -> HumanMotion {
@@ -83,6 +101,7 @@ public enum BVH {
         var stack: [Int?] = []  // nil marks an End Site block
         var pendingParent: Int? = nil
         var pendingEndSite = false
+        var endSites: [Int: Vec3] = [:]
         loop: while true {
             let token = word()
             switch token {
@@ -102,6 +121,7 @@ public enum BVH {
             case "OFFSET":
                 let offset = Vec3(try number(), try number(), try number())
                 if !pendingEndSite, let current = stack.last, let index = current { joints[index].offset = offset }
+                if pendingEndSite, let owner = stack.dropLast().last, let index = owner { endSites[index] = offset }
             case "CHANNELS":
                 let count = Int(try number())
                 var channels: [Channel] = []
@@ -135,9 +155,13 @@ public enum BVH {
         func basis(_ p: Vec3) -> Vec3 { options.yUp ? YUpToZUp.point(p) : p }
         func basis(_ q: Quat) -> Quat { options.yUp ? YUpToZUp.rotation(q) : q }
 
-        let skeleton = HumanSkeleton(name: options.skeletonName, jointNames: joints.map(\.name),
-                                     parents: joints.map(\.parent),
+        let renamed = Set(options.jointRenames.values)
+        let names = joints.map { joint in
+            options.jointRenames[joint.name] ?? (renamed.contains(joint.name) ? joint.name + "_src" : joint.name)
+        }
+        var skeleton = HumanSkeleton(name: options.skeletonName, jointNames: names, parents: joints.map(\.parent),
                                      restOffsets: joints.map { basis($0.offset * scale) })
+        skeleton.endSites = endSites.mapValues { basis($0 * scale) }
 
         let degrees = Double.pi / 180
         let axisX = Vec3(1, 0, 0), axisY = Vec3(0, 1, 0), axisZ = Vec3(0, 0, 1)

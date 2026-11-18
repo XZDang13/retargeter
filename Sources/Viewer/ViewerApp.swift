@@ -53,7 +53,7 @@ public final class ViewerApp: Sendable {
         }
         let surface = try? BodySurface.load(file: config.repositoryRoot + "/assets/body_models/soma/surface_lo.npz")
         self.surface = surface
-        contactGroups = surface.flatMap { try? ContactGroups.soma($0) }
+        contactGroups = surface.flatMap { try? ContactGroups.of($0) }
         var state: GPUState?
         if let surface, let device = try? ComputeDevice.makeDefault(backend: .gpu),
            let skinning = try? SurfaceSkinning(device: device, surface: surface) {

@@ -60,6 +60,16 @@ recorded, not judged; acceleration limits are derived from the robot model, over
 also carries the validator's joint torques (`tau`), contact forces (`contact_force`), `dynamics_residual` and
 `zmp`. `retarget realtime --help` lists the options.
 
+**Other skeletons.** BVH files from any skeleton (LAFAN1, other mocap or generated motion) retarget with a skeleton
+config that names their joints (DESIGN §16); `Configs/skeletons/lafan1.json` is one:
+
+```bash
+build/release/retarget offline my_clips/ --skeleton Configs/skeletons/lafan1.json --out out_lafan
+```
+
+The reference pose comes from a standing frame of the clips and the contact body is generated from the bones; the
+viewer, `validate` and `teleop` still take SOMA clips only.
+
 Validate trajectories from any tool (our `.npz`, NVIDIA soma-retargeter `.csv`) against their source clips:
 
 ```bash

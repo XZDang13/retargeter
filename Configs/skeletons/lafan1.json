@@ -1,0 +1,27 @@
+// LAFAN1-style BVH (Ubisoft La Forge; also the Monastery / MJ_Zombie test clips): centimetres, Y-up.
+// "joints": canonical joint (the names the mappings use, after the SOMA skeleton) -> this skeleton's joint, or a
+// list of candidates (the first one a file has is used). Required: Hips, Chest, Head and per side Leg (hip joint),
+// Shin (knee), Foot (ankle), ToeBase, Arm (shoulder joint), ForeArm (elbow), Hand (wrist).
+{
+  "name": "lafan1",
+  "units": 0.01,
+  "up": "y",
+  "joints": {
+    "Hips": "Hips",
+    "Chest": ["Spine2", "Spine1"],
+    "Head": "Head",
+    "LeftLeg": "LeftUpLeg",    "RightLeg": "RightUpLeg",
+    "LeftShin": "LeftLeg",     "RightShin": "RightLeg",
+    "LeftFoot": "LeftFoot",    "RightFoot": "RightFoot",
+    "LeftToeBase": "LeftToe",  "RightToeBase": "RightToe",
+    "LeftArm": "LeftArm",      "RightArm": "RightArm",
+    "LeftForeArm": "LeftForeArm", "RightForeArm": "RightForeArm",
+    "LeftHand": "LeftHand",    "RightHand": "RightHand"
+  },
+  // Reference pose: a frame where the person stands with both feet flat ("auto": the most upright, still frame
+  // with both feet planted). It is turned into a T-pose by swinging bones, keeping each joint's captured twist.
+  "reference": { "frame": "auto" },
+  // Capsule body for contacts (radii in m for a 1.75 m person, scaled by the skeleton's height); see
+  // CustomBody.defaultRadii for the keys.
+  "body": { "radii": {} }
+}

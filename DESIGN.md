@@ -973,6 +973,13 @@ retargeter/
   fixed-lag windows. 10 acceleration-only rejects: 0 → 10 accepted (ratios 0.85-1.02), tracking mean / p95
   unchanged to 0.1 mm; 10 jump clips: ratios ≤ 1.03 (were up to 2.7), 0 → 6 accepted (the rest:
   `dyn_flight_residual_max`); 10 accepted clips unchanged. Solver time unchanged.
+- Custom skeletons (2026-11-18, §16). Reference from a standing frame of the clip rather than a rig T-pose (LAFAN
+  rest poses are not physical: every bone along local +X). Two corrections found against the baked SOMA reference
+  (SOMA clip read through the generic path): feet re-aimed after the leg swings inherited the legs' and body's
+  pitch (robot soles 10.7° tilted in flat stance, baked 0.9°; now 0.1°), and a pelvis set by "hips to chest
+  vertical" leaned the robot back 5° on a walk (lumbar curve; now the captured pelvis, 0.7° from the baked one).
+  Arms are raised from hanging (down, then out about the forward axis) and the frame choice prefers hanging
+  hands: a minimal swing from wherever the arm was gave up to 59° of arm twist (now 14°).
 
 ## 15. Open questions
 
@@ -992,3 +999,33 @@ retargeter/
 
 - BONES-SEED `soma_shapes/` (uniform-skeleton shape params) is gated on Hugging Face — needed locally for
   the SOMA body-surface bake; otherwise we fall back to the SOMA-X template body or capsules.
+
+## 16. Custom skeletons
+
+Any BVH skeleton can be retargeted with a skeleton config (`Configs/skeletons/<name>.json`, e.g. `lafan1.json`;
+`retarget realtime|offline <inputs> --skeleton FILE`). The robot mappings stay as they are: they name SOMA joints, and
+the config says which joints of the skeleton those are.
+
+- **Config.** `units` (file units to metres, default 0.01), `up` (`"y"` BVH default, or `"z"`), `joints`
+  (canonical joint → the skeleton's joint, or a list of candidates, the first one present wins; required: Hips,
+  Chest, Head and per side Leg = hip, Shin = knee, Foot = ankle, ToeBase, Arm = shoulder, ForeArm = elbow,
+  Hand = wrist), `reference.frame` (a frame index, or `"auto"`), `body.radii` (capsule radii overrides).
+  Reading a file renames those joints to the canonical names; a joint whose own name would collide gets "_src".
+- **Grouping.** Input clips are grouped by skeleton (joint names and bone lengths, read from the hierarchy only);
+  each group gets its own reference pose, body and retargeter, built from its first clip.
+- **Reference pose** (`CustomBody.tPose`), from one standing frame: `auto` takes the frame with both ankles near
+  their lowest and still, the head high, the hands low and the body slow. The pelvis keeps its captured tilt and
+  is turned to face +X; spine and neck bones are swung vertical; legs straight down; each foot keeps its captured
+  world orientation, turned to point +X (it stood flat); arms swung down, then out sideways about the forward
+  axis. Swings keep each joint's captured twist, so rig axis conventions never need to be known. Rotation offsets
+  and limb scales then come from this pose exactly as from the baked SOMA T-pose.
+- **Body** (`CustomBody.capsules`): ~15k points on capsules around the bones (rings ~1.5 cm apart; radii for a
+  1.75 m person, scaled by the skeleton's height) and boxes for the feet (sole flat 2.5 cm below the toe joint,
+  heel 6 cm behind the ankle, to the toe End Site), each point rigidly on one joint and labelled with one of the
+  standard contact groups (heel, toe, knee, shin, thigh, hand, elbow, forearm, upper arm, pelvis, torso, head), so
+  contact analysis, the validator and the solver's contact terms run unchanged.
+- **Checked** on a SOMA clip read as a custom skeleton (RetargetTests `[custom]`): reference within 0.7° (pelvis),
+  1.3° (chest), 6° (legs), 2° (feet), 14° (upper arm twist) of the baked one; a walk tracks 1.1 cm (baked 1.6 cm)
+  with identical foot contacts, robot root within 0.3 cm and pelvis within 3° of the baked path, soles flat (0.1°).
+- **Not yet:** the viewer, `validate` and `teleop` still assume the SOMA skeleton.
+

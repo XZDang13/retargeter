@@ -51,7 +51,7 @@ public final class HumanRetargeter {
         self.device = device
         self.robot = robot
         self.surface = surface
-        groups = try ContactGroups.soma(surface)
+        groups = try ContactGroups.of(surface)
         var setup = try RetargetSetup(mapping: mapping, robot: robot, skeleton: skeleton, humanReference: reference)
         solver = try RetargetSolver(device: device, setup: setup)
         if let pose = mapping.referencePose {

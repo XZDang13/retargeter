@@ -107,7 +107,7 @@ struct TeleopCommand {
         let mapping = try RetargetMapping.load(file: repository + "/Configs/mappings/soma77_\(robot).json")
         let surface = try BodySurface.load(file: repository + "/assets/body_models/soma/surface_lo.npz")
         let device = try ComputeDevice.makeDefault(backend: .gpu)
-        let groups = try ContactGroups.soma(surface).names
+        let groups = try ContactGroups.of(surface).names
 
         let socket = try ZMQSocket(.router)
         try socket.set(33, 1)        // ZMQ_ROUTER_MANDATORY: report unroutable replies instead of dropping silently

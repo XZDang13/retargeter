@@ -32,6 +32,7 @@ struct RealtimeCommand {
     var lag: Double?
     var lagSweeps = 5
     var lagRate = 50.0
+    var skeletonConfig: String?
 
     static let usage = """
     usage: retarget realtime|offline <bvh files or directories>... [options]
@@ -54,6 +55,9 @@ struct RealtimeCommand {
                           (frames emitted S seconds late, refined meanwhile with the offline costs)
       --lag-sweeps N      sweeps of the fixed-lag window per window solve (default 5)
       --lag-rate HZ       window solves per second of input (default 50, the policy rate; 0: every frame)
+      --skeleton FILE     custom skeleton config (e.g. Configs/skeletons/lafan1.json): units, up axis and which joints
+                          are the canonical ones; each distinct skeleton in the input gets its own reference pose and
+                          capsule body (default: SOMA uniform skeleton, baked body surface)
     """
 
     init(mode: String, arguments: [String]) throws {
@@ -82,6 +86,7 @@ struct RealtimeCommand {
             case "--lag": lag = Double(try value())
             case "--lag-sweeps": lagSweeps = max(1, Int(try value()) ?? lagSweeps)
             case "--lag-rate": lagRate = max(0, Double(try value()) ?? lagRate)
+            case "--skeleton": skeletonConfig = try value()
             case let flag where flag.hasPrefix("--"): throw CLIError("unknown option \(flag)")
             default: inputs.append(arguments[i])
             }
@@ -121,7 +126,6 @@ struct RealtimeCommand {
         let mappingFile = repository + "/Configs/mappings/soma77_\(robot).json"
         let mapping = try RetargetMapping.load(file: mappingFile)
         let configHash = hash(readFile(mappingFile) ?? []) + "-" + RobotMotionExport.version
-        let surface = try BodySurface.load(file: repository + "/assets/body_models/soma/surface_lo.npz")
         let device = try ComputeDevice.makeDefault(backend: backend)
 
         let files = collectFiles()
@@ -135,6 +139,41 @@ struct RealtimeCommand {
         defer { if let manifest { fclose(manifest) } }
 
         let geometry = try RobotGeometry(robot: model, pointsFile: directory + "/mesh_points.npz")
+        guard let skeletonConfig else {
+            let surface = try BodySurface.load(file: repository + "/assets/body_models/soma/surface_lo.npz")
+            return try process(todo, options: BVHOptions(), surface: surface)
+        }
+        // Custom skeletons: clips grouped by skeleton (joints and bone lengths); each group's reference pose and body
+        // come from its first clip.
+        let config = try SkeletonConfig.load(file: skeletonConfig)
+        var groups: [(key: String, files: [(path: String, relative: String)], skeleton: HumanSkeleton)] = []
+        for file in todo {
+            do {
+                let skeleton = try BVH.loadSkeleton(file: file.path, options: config.rawOptions)
+                let key = zip(skeleton.jointNames, skeleton.restOffsets).map { "\($0) \(format($1.x)) \(format($1.y)) \(format($1.z))" }
+                    .joined(separator: ";")
+                if let g = groups.firstIndex(where: { $0.key == key }) { groups[g].files.append(file) }
+                else { groups.append((key, [file], skeleton)) }
+            } catch {
+                log(manifest, file.path, status: "error", detail: "\(error)")
+            }
+        }
+        for (k, group) in groups.enumerated() {
+            let options: BVHOptions, body: (surface: BodySurface, frame: Int)
+            do {
+                options = try config.bvhOptions(for: group.skeleton)
+                body = try CustomBody.make(try BVH.load(file: group.files[0].path, options: options), config: config)
+            } catch {
+                print("\(mode): skeleton \(k + 1)/\(groups.count) (\(group.files.count) clips) skipped: \(error)")
+                for file in group.files { log(manifest, file.path, status: "error", detail: "\(error)") }
+                continue
+            }
+            print("\(mode): skeleton \(k + 1)/\(groups.count): \(group.files.count) clips, \(group.skeleton.jointCount) joints, "
+                  + "reference frame \(body.frame) of \(group.files[0].relative), \(body.surface.vertexCount) body points")
+            try process(group.files, options: options, surface: body.surface)
+        }
+
+        func process(_ todo: [(path: String, relative: String)], options: BVHOptions, surface: BodySurface) throws {
         let start = ContinuousClock.now
         var done = 0, failed = 0, frames = 0, rejected = 0, ticks = 0
         var timing: (prepare: Duration, solve: Duration, sweeps: Duration, validate: Duration) = (.zero, .zero, .zero, .zero)
@@ -146,7 +185,7 @@ struct RealtimeCommand {
         func load(_ chunk: [(path: String, relative: String)]) -> (loaded: Loaded, failed: Int) {
             var loaded: Loaded = [], failures = 0
             for file in chunk {
-                do { loaded.append((file, try BVH.load(file: file.path))) } catch {
+                do { loaded.append((file, try BVH.load(file: file.path, options: options))) } catch {
                     failures += 1
                     log(manifest, file.path, status: "error", detail: "\(error)")
                 }
@@ -296,6 +335,7 @@ struct RealtimeCommand {
             if !more { break }
         }
         if let last = finishing { account(try last.wait()) }
+        }
     }
 
     func stem(_ relative: String) -> String { String(relative.dropLast(4)) }

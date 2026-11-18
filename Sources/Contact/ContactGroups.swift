@@ -20,6 +20,38 @@ public struct ContactGroups: Sendable {
 
     public func index(of name: String) -> Int? { names.firstIndex(of: name) }
 
+    /// The groups of a surface: its own labels when it has them (generated bodies), else the SOMA ones.
+    public static func of(_ surface: BodySurface) throws -> ContactGroups {
+        guard let labels = surface.vertexGroups else { return try soma(surface) }
+        var vertices = [[Int]](repeating: [], count: labels.names.count)
+        for (v, g) in labels.group.enumerated() where g >= 0 && !surface.excluded[v] { vertices[Int(g)].append(v) }
+        return ContactGroups(names: labels.names, classes: labels.names.map(contactClass), vertices: vertices,
+                             massFractions: massFractions(labels.names))
+    }
+
+    /// The SOMA group names, in their order: per side heel, toe, knee, shin, thigh, hand, elbow, forearm, upper arm,
+    /// then pelvis, torso and head.
+    public static let standardNames: [String] = ["left", "right"].flatMap { side in
+        ["heel", "toe", "knee", "shin", "thigh", "hand", "elbow", "forearm", "upper_arm"].map { "\(side)_\($0)" }
+    } + ["pelvis", "torso", "head"]
+
+    static func contactClass(_ name: String) -> ContactClass {
+        name.hasSuffix("_heel") || name.hasSuffix("_toe") ? .foot : ["pelvis", "torso", "head"].contains(name) ? .trunk : .limb
+    }
+
+    /// Segment masses after de Leva (1996), split across our finer groups, normalised over `names`.
+    static func massFractions(_ names: [String]) -> [Double] {
+        let mass: [String: Double] = [
+            "heel": 0.007, "toe": 0.007, "knee": 0.012, "shin": 0.031, "thigh": 0.142, "hand": 0.006,
+            "elbow": 0.004, "forearm": 0.012, "upper_arm": 0.027, "pelvis": 0.13, "torso": 0.30, "head": 0.069,
+        ]
+        let fractions = names.map { name in
+            mass[name.hasPrefix("left_") ? String(name.dropFirst(5)) : name.hasPrefix("right_") ? String(name.dropFirst(6)) : name] ?? 0
+        }
+        let total = fractions.reduce(0, +)
+        return fractions.map { $0 / total }
+    }
+
     /// Groups for the SOMA skeleton, from each vertex's dominant skinning joint. Shin and forearm are split
     /// into knee / elbow (the third nearest the joint) and the rest of the segment.
     public static func soma(_ surface: BodySurface) throws -> ContactGroups {
@@ -76,16 +108,7 @@ public struct ContactGroups: Sendable {
                 vertices[g].append(v)
             }
         }
-        // Segment masses after de Leva (1996), split across our finer groups.
-        let mass: [String: Double] = [
-            "heel": 0.007, "toe": 0.007, "knee": 0.012, "shin": 0.031, "thigh": 0.142, "hand": 0.006,
-            "elbow": 0.004, "forearm": 0.012, "upper_arm": 0.027, "pelvis": 0.13, "torso": 0.30, "head": 0.069,
-        ]
-        var fractions = names.map { name in
-            mass[name.hasPrefix("left_") ? String(name.dropFirst(5)) : name.hasPrefix("right_") ? String(name.dropFirst(6)) : name] ?? 0
-        }
-        let total = fractions.reduce(0, +)
-        fractions = fractions.map { $0 / total }
+        let fractions = massFractions(names)
         return ContactGroups(names: names, classes: classes, vertices: vertices, massFractions: fractions)
     }
 }

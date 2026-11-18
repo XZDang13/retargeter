@@ -7,6 +7,8 @@ public struct HumanSkeleton: Sendable {
     public var parents: [Int?]
     /// Rest translation of each joint in its parent frame.
     public var restOffsets: [Vec3]
+    /// End Site offsets (joint frame) of the joints that have one: the toe and finger tips, the top of the head.
+    public var endSites: [Int: Vec3] = [:]
 
     public init(name: String, jointNames: [String], parents: [Int?], restOffsets: [Vec3]) {
         self.name = name

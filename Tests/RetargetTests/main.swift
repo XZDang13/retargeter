@@ -695,4 +695,98 @@ test("[g1_29dof] offline keeps the robot above the ground when goals go below it
     expect(lowest > -0.02, "ground barrier holds")
 }
 
+// Custom skeletons (Configs/skeletons): a SOMA clip read through the generic path (joints named as they are, reference
+// from a standing frame, capsule body) against the baked SOMA reference and body.
+func somaAsCustom() throws -> SkeletonConfig {
+    let file = "/tmp/retargeter_test_skeleton_\(getpid()).json"
+    let text = #"{ "name": "soma_custom", "units": 0.01, "up": "y", "joints": {}, "reference": { "frame": "auto" } }"#
+    guard let f = fopen(file, "w") else { throw JSONError(message: "cannot write \(file)") }
+    fputs(text, f)
+    fclose(f)
+    defer { unlink(file) }
+    return try SkeletonConfig.load(file: file)
+}
+
+test("[custom] reference from a standing frame matches the baked SOMA T-pose") {
+    let config = try somaAsCustom()
+    let motion = try BVH.load(file: bvhRoot + "230322/body_check_001__A296.bvh", options: try config.bvhOptions(for: motions[0].skeleton))
+    let (custom, frame) = try CustomBody.make(motion, config: config)
+    let baked = surface.referencePose!, ours = custom.referencePose!
+    let s = motion.skeleton, hips = s.jointIndex(named: "Hips")!
+    print("  reference frame \(frame), \(custom.vertexCount) body points")
+    // Trunk, legs and feet as the rig's T-pose has them; the arms' twist is the hanging arm's, which the baked T-pose
+    // does not share exactly (forearm and hand rotations are weighted lightly).
+    for (name, tolerance) in [("Hips", 3.0), ("Chest", 3.0), ("LeftLeg", 8.0), ("LeftShin", 8.0), ("LeftFoot", 4.0),
+                              ("RightFoot", 4.0), ("LeftArm", 20.0), ("LeftForeArm", 20.0), ("LeftHand", 40.0), ("RightHand", 40.0)] {
+        let j = s.jointIndex(named: name)!
+        let angle = Quat.angle(baked[j].rotation, ours[j].rotation) * 180 / .pi
+        let offset = length((ours[j].translation - ours[hips].translation) - (baked[j].translation - baked[hips].translation))
+        print("  \(name.padding(12)) rotation \(format(angle))°, position (from the hips) \(format(100 * offset)) cm")
+        expect(angle < tolerance, "\(name) reference rotation within \(tolerance)° of the baked one")
+        expect(offset < 0.06, "\(name) reference position within 6 cm")
+    }
+    print("  hips height \(format(ours[hips].translation.z)) m (baked \(format(baked[hips].translation.z)))")
+    expect(abs(ours[hips].translation.z - baked[hips].translation.z) < 0.03, "feet on the ground at the same height")
+}
+
+test("[custom] SOMA walk through the generic path tracks and finds contacts like the baked body") {
+    let config = try somaAsCustom()
+    let (_, robot) = robots[0]
+    let walk = HumanMotion(skeleton: motions[0].skeleton, fps: motions[0].fps, local: Array(motions[0].local.prefix(1200)))
+    let (custom, _) = try CustomBody.make(walk, config: config)
+    let ours = try HumanRetargeter(device: gpu, robot: robot, mapping: try mapping("g1_29dof"), surface: custom, skeleton: walk.skeleton)
+    let baked = try HumanRetargeter(device: gpu, robot: robot, mapping: try mapping("g1_29dof"), surface: surface, skeleton: walk.skeleton)
+    let a = try baked.retarget([walk])[0], b = try ours.retarget([walk])[0]
+    let ea = trackingErrors(baked.setup, a.trajectory, a.prepared.goals).pos, eb = trackingErrors(ours.setup, b.trajectory, b.prepared.goals).pos
+    let ma = ea.reduce(0, +) / Double(ea.count), mb = eb.reduce(0, +) / Double(eb.count)
+    print("  tracking mean: baked \(format(ma)) m, custom \(format(mb)) m")
+    expect(mb < ma + 0.01, "tracks about as well")
+    var agree = 0, total = 0
+    for f in 0..<a.contacts.frameCount {
+        for name in ["left_heel", "left_toe", "right_heel", "right_toe"] {
+            let ga = a.contacts.groupNames.firstIndex(of: name)!, gb = b.contacts.groupNames.firstIndex(of: name)!
+            agree += a.contacts.contact(f, ga) == b.contacts.contact(f, gb) ? 1 : 0
+            total += 1
+        }
+    }
+    print("  foot contact agreement \(format(100 * Double(agree) / Double(total))) %")
+    expect(Double(agree) > 0.95 * Double(total), "the capsule feet find the same contacts")
+    // Sole tilt of the robot feet while the person's heel and toe both touch.
+    func tilt(_ r: RetargetResult, _ h: HumanRetargeter) -> Double {
+        var angles: [Double] = []
+        for f in 0..<r.trajectory.frameCount {
+            let world = robot.forwardKinematics(root: r.trajectory.root[f], q: r.trajectory.q[f])
+            for (side, link) in [("left", "left_ankle_roll_link"), ("right", "right_ankle_roll_link")] {
+                let heel = r.contacts.groupNames.firstIndex(of: side + "_heel")!, toe = r.contacts.groupNames.firstIndex(of: side + "_toe")!
+                guard r.contacts.contact(f, heel) && r.contacts.contact(f, toe) else { continue }
+                angles.append(acos(min(1, world[robot.linkIndex(named: link)!].rotation.rotate(Vec3(0, 0, 1)).z)) * 180 / .pi)
+            }
+        }
+        return percentile(angles, 0.5)
+    }
+    let soleTilt = tilt(b, ours)
+    print("  robot sole tilt in flat stance (median): baked \(format(tilt(a, baked)))°, custom \(format(soleTilt))°")
+    expect(soleTilt < 3, "flat feet stand flat")
+    let root = zip(a.trajectory.root, b.trajectory.root).map { length($0.translation - $1.translation) }
+    let pelvis = zip(a.trajectory.root, b.trajectory.root).map { Quat.angle($0.rotation, $1.rotation) * 180 / .pi }
+    func uprightness(_ r: RetargetResult) -> String {
+        var pelvis: [Double] = [], torso: [Double] = []
+        for f in 0..<r.trajectory.frameCount {
+            let world = robot.forwardKinematics(root: r.trajectory.root[f], q: r.trajectory.q[f])
+            func pitch(_ link: String) -> Double {
+                let x = world[robot.linkIndex(named: link)!].rotation.rotate(Vec3(1, 0, 0))
+                return asin(max(-1, min(1, -x.z))) * 180 / .pi
+            }
+            pelvis.append(pitch("pelvis"))
+            torso.append(pitch("torso_link"))
+        }
+        return "pelvis \(format(pelvis.reduce(0, +) / Double(pelvis.count)))°, torso \(format(torso.reduce(0, +) / Double(torso.count)))°"
+    }
+    print("  robot forward pitch mean: baked \(uprightness(a)); custom \(uprightness(b))")
+    print("  robot pelvis orientation difference mean \(format(pelvis.reduce(0, +) / Double(pelvis.count)))°")
+    expect(pelvis.reduce(0, +) / Double(pelvis.count) < 6, "pelvis close to the baked path")
+    print("  robot root difference mean \(format(100 * root.reduce(0, +) / Double(root.count))) cm")
+    expect(root.reduce(0, +) / Double(root.count) < 0.02, "root within 2 cm of the baked path")
+}
+
 finishTests()

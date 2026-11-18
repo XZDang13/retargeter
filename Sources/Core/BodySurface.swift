@@ -15,6 +15,9 @@ public struct BodySurface: Sendable {
     public var excluded: [Bool]
     /// World joint transforms of the reference (T-) pose, facing +X with the feet on z = 0.
     public var referencePose: [Transform]?
+    /// Contact group of each vertex (index into `names`), for surfaces generated with their groups (custom
+    /// skeletons); nil: groups from the SOMA skinning joints.
+    public var vertexGroups: (names: [String], group: [Int32])?
 
     public init(jointNames: [String], restVertices: [Vec3], bind: [Transform], weightJoints: [Int32],
                 weightValues: [Float], influences: Int, triangles: [SIMD3<Int32>], excluded: [Bool]? = nil,
