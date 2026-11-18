@@ -3,6 +3,9 @@
 // Started from the literature (docs/retargeting-survey.md §5); calibrated on a 128-clip SOMA sample (DESIGN §14,
 // 2026-10-28). Values are rounded to two significant digits of the bound before comparing (0.25: 0.01 steps), so a
 // metric a hair over its bound does not fail; a rule's "precision" overrides the step.
+// Robot rules (2026-11-18): the calibrated bound warns, a reject bound ~25 % above it fails (clips a little over
+// tracked fine in sim2sim; half of all rejects were within 1.15-1.5x of their bound). Discrete errors (limits,
+// jumps, teleports, non-finite values) and penetrations beyond half a centimetre still fail.
 {
   "human": [
     { "metric": "env_contact_frames",     "max": 0,    "severity": "reject" },
@@ -27,35 +30,47 @@
     { "metric": "non_finite_values",      "max": 0,    "severity": "reject" }
   ],
   "robot": [
-    { "metric": "tracking_pos_mean",           "max": 0.08,  "severity": "reject" },
-    { "metric": "tracking_pos_p95",            "max": 0.20,  "severity": "reject" },
+    { "metric": "tracking_pos_mean",           "max": 0.08,  "severity": "warn" },
+    { "metric": "tracking_pos_mean",           "max": 0.10,  "severity": "reject" },
+    { "metric": "tracking_pos_p95",            "max": 0.20,  "severity": "warn" },
+    { "metric": "tracking_pos_p95",            "max": 0.25,  "severity": "reject" },
     { "metric": "tracking_rot_p95_deg",        "max": 45,    "severity": "warn" },
     { "metric": "limit_violation_frames",      "max": 0,     "severity": "reject" },
-    { "metric": "velocity_violation_frames",   "max": 0,     "severity": "reject" },
+    // Joint speed over the URDF limit: any frame warns, a peak 25 % over fails.
+    { "metric": "velocity_violation_frames",   "max": 0,     "severity": "warn" },
+    { "metric": "velocity_ratio_max",          "max": 1.25,  "severity": "reject" },
     { "metric": "joint_jump_frames",           "max": 0,     "severity": "reject" },
     { "metric": "root_teleport_frames",        "max": 0,     "severity": "reject" },
     // Robot minus human planted-part slide speed, p95 (m/s). Turning jogs reach 0.05-0.08 from 20-60 ms slides at
     // touchdown / toe-off (~5 mm each); sustained skating is well beyond.
-    { "metric": "foot_skate_excess",           "max": 0.08,  "severity": "reject" },
+    { "metric": "foot_skate_excess",           "max": 0.08,  "severity": "warn" },
+    { "metric": "foot_skate_excess",           "max": 0.10,  "severity": "reject" },
     { "metric": "foot_skate_p95",              "max": 0.15,  "severity": "warn" },
-    { "metric": "foot_float_p95",              "max": 0.03,  "severity": "reject" },
-    { "metric": "ground_penetration_max",      "max": 0.02,  "severity": "reject" },
+    { "metric": "foot_float_p95",              "max": 0.03,  "severity": "warn" },
+    { "metric": "foot_float_p95",              "max": 0.04,  "severity": "reject" },
+    { "metric": "ground_penetration_max",      "max": 0.02,  "severity": "warn" },
+    { "metric": "ground_penetration_max",      "max": 0.025, "severity": "reject" },
     // Measured on capsules fitted to the link meshes, which approximate the surface to ~1 cm (sample max 0.013).
-    { "metric": "self_collision_max",          "max": 0.02,  "severity": "reject" },
+    { "metric": "self_collision_max",          "max": 0.02,  "severity": "warn" },
+    { "metric": "self_collision_max",          "max": 0.025, "severity": "reject" },
     { "metric": "start_tilt_deg",              "max": 20,    "severity": "warn" },
     { "metric": "end_stability_margin",        "min": -0.03, "severity": "warn" },
     // Dynamics (DESIGN §6): values held for a window (dynamics_*_window), so single noisy frames do not count.
     // Feasibility = CoM support (residual, ZMP) and joint velocity / acceleration limits. Joint torques are
     // recorded (torque_ratio_*) but not judged.
-    { "metric": "dyn_residual_max",            "max": 0.25,  "severity": "reject" },
+    { "metric": "dyn_residual_max",            "max": 0.25,  "severity": "warn" },
+    { "metric": "dyn_residual_max",            "max": 0.30,  "severity": "reject" },
     // Warn on the top ~5 % (sample p90 0.15, p95 0.18); 0.10 warned on 30 % of clips.
     { "metric": "dyn_residual_p95",            "max": 0.20,  "severity": "warn" },
     // In flight (no ground contact) the residual is a CoM not falling ballistically, partly inherent to uniform
     // scaling (~0.2 m·g); natural jumps 0.13-0.38 on the comparison and sample clips.
-    { "metric": "dyn_flight_residual_max",     "max": 0.40,  "severity": "reject" },
+    { "metric": "dyn_flight_residual_max",     "max": 0.40,  "severity": "warn" },
+    { "metric": "dyn_flight_residual_max",     "max": 0.50,  "severity": "reject" },
     // ZMP outside the support, held 0.3 s (m). Sample p95 0.036, p99 0.053.
-    { "metric": "zmp_outside_max",             "max": 0.06,  "severity": "reject" },
-    { "metric": "joint_acc_ratio_max",         "max": 1.0,   "severity": "reject" }
+    { "metric": "zmp_outside_max",             "max": 0.06,  "severity": "warn" },
+    { "metric": "zmp_outside_max",             "max": 0.08,  "severity": "reject" },
+    { "metric": "joint_acc_ratio_max",         "max": 1.0,   "severity": "warn" },
+    { "metric": "joint_acc_ratio_max",         "max": 1.25,  "severity": "reject" }
   ],
   // Parameters of the metrics themselves.
   "parameters": {

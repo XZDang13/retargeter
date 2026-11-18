@@ -422,21 +422,23 @@ Human-side pre-filter:
 | clip length                                               | < 10 frames              | UniTracker    |
 | input sanity: NaNs, lost tracking, root teleports         | any                      | —             |
 
-Robot-side post-filter:
+Robot-side post-filter (warn at the calibrated bound, reject ~25 % above it; `Configs/reject/g1.json` is the source of
+truth):
 
-| group     | metric                                                      | default threshold   |
+| group     | metric                                                      | warn > / reject >   |
 |-----------|-------------------------------------------------------------|---------------------|
-| tracking  | mean / p95 target position error (after scaling)            | 5 cm / 10 cm        |
-| tracking  | end-effector max error; link orientation error              | 15 cm; 10°          |
-| limits    | joint position / velocity beyond limits (frames)            | 0                   |
-| smoothness| p99 joint acceleration / jerk; joint-jump detector          | per joint           |
-| contact   | stance slide speed; floating / penetration in contact       | 10 cm/s; 1 cm       |
-| collision | self-collision penetration (capsules)                       | 2 cm                |
-| dynamics  | contact-wrench residual (unexplained base wrench), N / N·m  | relative to m·g     |
-| limits    | joint acceleration / effort-limited acceleration, held 50 ms | ≤ 1.0×             |
+| tracking  | mean / p95 target position error (after scaling)            | 8 / 10 cm; 20 / 25 cm |
+| tracking  | link orientation error p95                                  | 45° (warn only)     |
+| limits    | joint position beyond limits (frames); joint jumps; teleports | 0 (reject)        |
+| limits    | joint velocity over the URDF limit                          | any frame / peak 1.25× |
+| limits    | joint acceleration / effort-limited acceleration, held 50 ms | 1.0× / 1.25×       |
+| contact   | foot skate excess over the human's (p95)                    | 0.08 / 0.10 m/s     |
+| contact   | foot float p95; ground penetration                          | 3 / 4 cm; 2 / 2.5 cm |
+| collision | self-collision penetration (capsules)                       | 2 / 2.5 cm          |
+| dynamics  | unexplained wrench, held 0.1 s (supported; in flight)       | 0.25 / 0.30; 0.40 / 0.50 |
+| dynamics  | ZMP outside the support, held 0.3 s                         | 6 / 8 cm            |
 | dynamics  | torque over effort limit, held 50 ms                        | recorded, not judged |
-| dynamics  | ZMP outside the support, held 0.3 s                         | 6 cm                |
-| boundary  | first frame reachable from default pose; last frame statically stable | required  |
+| boundary  | start tilt; end stability margin                            | warn only           |
 
 - **Auto-reject is ON by default** (`--auto-reject` / `--no-auto-reject`).
 - v1 rejects **whole clips** only — no trimming or splitting of bad segments.
@@ -987,12 +989,25 @@ retargeter/
   sim2sim (root height error < 5 cm, body error 2-5 cm root-relative). The rule judges the source, the solver
   changes the motion, and the robot's own support is checked by `dyn_residual_max` / `zmp_outside_max`. It was the
   only reason for 32 (29 DoF) / 47 (23 DoF) BONES-SEED rejects. The user suspects the human check itself; open (§15).
+- Robot rules get a warning band (2026-11-18, user: a little over should warn, not reject). Half of each rule's
+  BONES-SEED rejects were within 1.15-1.5x of the bound, and the LAFAN clips 1.03-1.3x over tracked in sim2sim. The
+  calibrated bound now warns and a bound ~25 % above it rejects (tracking mean 0.08 / 0.10, p95 0.20 / 0.25; skate
+  excess 0.08 / 0.10; float 0.03 / 0.04; ground penetration and self-collision 0.02 / 0.025; residual 0.25 / 0.30,
+  in flight 0.40 / 0.50; ZMP 0.06 / 0.08; acceleration ratio 1.0 / 1.25; velocity: any frame over warns, a peak
+  ratio over 1.25 rejects). Discrete errors still reject. On the existing BONES-SEED metrics: 29 DoF 121,061 ->
+  127,335 accepted (93.0 %), 23 DoF 121,567 -> 126,214 (92.2 %); the four LAFAN results are accepted with warnings.
 
 ## 15. Open questions
 
-- Human support check (2026-11-18): `unsupported_seconds` flagged two generated clips a policy tracks (§14, demoted to
-  a warning). Whether the point-mass ZMP from surface-group centroids (de Leva fractions, ±50 ms accelerations) is
-  too strict, or such clips are only trackable because the robot motion differs, is not settled.
+- Human support check (2026-11-18, settled): `unsupported_seconds` flagged two generated clips a policy tracks (§14,
+  demoted to a warning). Not a bug: an independent de Leva segment model from the BVH joints (own foot rectangles
+  and contacts) flags the same windows (zombie 1.3-1.7 / 7.1-7.5 / 11.2-11.6 s, Monastery 0.2-0.8 / 1.4-1.7 /
+  3.5-4.0 s; ZMP 14-27 cm outside the feet) and 0 s on five SOMA controls. Longer smoothing (0.25 s) or a 15 cm
+  margin hides them, but 0.5 s smoothing starts flagging a real turning jog. The offline solver's dynamics term
+  repairs most of it (robot residual median 0.07 in those windows vs 0.009 elsewhere, Monastery) and the policy
+  absorbs the rest by letting the root drift: its world root error grows 0.12 -> 0.42 m over 1.3-2.5 s and again
+  from 3.5 s, the flagged windows. So the source is dynamically inconsistent, the robot motion mostly is not; the
+  robot-side rules are the right gate, and the human value stays as a warning.
 
 - Arm problems (2026-10-27; jump_right fixed 2026-10-28 by the branch switch, §14): jump_right_003__A030 falls into a shoulder gimbal branch (right
   shoulder roll −2.22, yaw 2.57, both at their limits, 1.4 – 3.4 s, then snaps at 3.58 s; elbow up to 14 cm off,

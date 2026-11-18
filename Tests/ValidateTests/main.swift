@@ -145,12 +145,16 @@ test("dynamics: standing, levitating, ballistic flight, leaning, heavy arms") {
         let world = robot.forwardKinematics(root: t.root[0], q: t.q[0])
         return validator.geometry.soles.flatMap { foot in foot.points.map { abs(world[foot.link].apply($0).z) } }.max()!
     }
-    let lean = [leaning(0.3, 1), leaning(0.3, -1)].min { soleLift($0) < soleLift($1) }!
-    expect(soleLift(lean) < 0.01, "feet flat while leaning (\(soleLift(lean)))")
-    let leaned = check(lean)
-    print("  leaning: residual \(format(leaned.metric("dyn_residual_max")!)), zmp outside \(format(leaned.metric("zmp_outside_max")!))")
-    expect(leaned.metric("zmp_outside_max")! > 0.05, "ZMP ahead of the toes")
-    expect(leaned.status == .rejected, "leaning rejected")
+    // A little over the ZMP bound warns; well over it rejects (the band between, DESIGN §14 2026-11-18).
+    for (angle, rejected) in [(0.3, false), (0.45, true)] {
+        let lean = [leaning(angle, 1), leaning(angle, -1)].min { soleLift($0) < soleLift($1) }!
+        expect(soleLift(lean) < 0.01, "feet flat while leaning (\(soleLift(lean)))")
+        let leaned = check(lean)
+        print("  leaning \(angle) rad: residual \(format(leaned.metric("dyn_residual_max")!)), zmp outside \(format(leaned.metric("zmp_outside_max")!)), \(leaned.status.rawValue)")
+        expect(leaned.metric("zmp_outside_max")! > 0.05, "ZMP ahead of the toes")
+        expect((leaned.status == .rejected) == rejected, "leaning \(angle) rad \(rejected ? "rejected" : "only warned")")
+        if !rejected { expect(leaned.warnings.contains { $0.contains("zmp_outside_max") }, "ZMP warning recorded") }
+    }
 
     // Arms held straight out with a fast swing: shoulder torque over the 25 N·m limit.
     let shoulder = robot.dofNames.firstIndex(of: "left_shoulder_pitch_joint")!
