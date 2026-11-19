@@ -1,5 +1,5 @@
-// Minimal HTTP/1.1 server (GET only, one request per connection) on POSIX sockets. It serves the
-// browser viewer on localhost; it is not meant to face a network.
+// Minimal HTTP/1.1 server (GET, and POST with a Content-Length body; one request per connection) on POSIX sockets.
+// It serves the browser viewer on localhost; it is not meant to face a network.
 
 import Dispatch
 
@@ -13,6 +13,10 @@ public struct HTTPRequest: Sendable {
     public var method: String
     public var path: String
     public var query: [String: String]
+    /// Header fields, names lowercased.
+    public var headers: [String: String] = [:]
+    /// POST body.
+    public var body: [UInt8] = []
 }
 
 public struct HTTPResponse: Sendable {
@@ -44,10 +48,13 @@ public final class HTTPServer: @unchecked Sendable {
     let port: UInt16
     let handler: Handler
     let upgrade: Upgrade?
+    /// Largest POST body accepted (bytes); larger requests get 413.
+    let maxBody: Int
     private var listener: Int32 = -1
 
-    public init(port: UInt16, handler: @escaping Handler, upgrade: Upgrade? = nil) {
+    public init(port: UInt16, maxBody: Int = 256 << 20, handler: @escaping Handler, upgrade: Upgrade? = nil) {
         self.port = port
+        self.maxBody = maxBody
         self.handler = handler
         self.upgrade = upgrade
     }
@@ -75,12 +82,12 @@ public final class HTTPServer: @unchecked Sendable {
         while true {
             let client = accept(listener, nil, nil)
             if client < 0 { continue }
-            let handler = self.handler, upgrade = self.upgrade
-            DispatchQueue.global().async { HTTPServer.serve(client, handler, upgrade) }
+            let handler = self.handler, upgrade = self.upgrade, maxBody = self.maxBody
+            DispatchQueue.global().async { HTTPServer.serve(client, handler, upgrade, maxBody: maxBody) }
         }
     }
 
-    private static func serve(_ fd: Int32, _ handler: Handler, _ upgrade: Upgrade?) {
+    private static func serve(_ fd: Int32, _ handler: Handler, _ upgrade: Upgrade?, maxBody: Int) {
         var keep = false
         defer { if !keep { close(fd) } }
         var buffer = [UInt8](repeating: 0, count: 16384)
@@ -92,26 +99,54 @@ public final class HTTPServer: @unchecked Sendable {
             if received.count >= 4 && received.suffix(4) == [13, 10, 13, 10] { break }
             if let _ = headerEnd(received) { break }
         }
-        guard let line = String(decoding: received, as: UTF8.self).split(separator: "\r\n").first else { return }
+        guard let end = headerEnd(received) else { return }
+        let headText = String(decoding: received[..<end], as: UTF8.self)
+        guard let line = headText.split(separator: "\r\n").first else { return }
         let parts = line.split(separator: " ")
         guard parts.count >= 2 else { return }
         let target = String(parts[1])
         let (path, query) = splitTarget(target)
-        let request = HTTPRequest(method: String(parts[0]), path: percentDecode(path), query: query)
-        // WebSocket upgrade: hand the connection over after the handshake.
-        if let upgrade, request.method == "GET" {
-            let headers = String(decoding: received, as: UTF8.self).split(separator: "\r\n").dropFirst()
-            let key = headers.first { $0.lowercased().hasPrefix("sec-websocket-key:") }
-                .map { $0.dropFirst("sec-websocket-key:".count).trimmingCharacters() }
-            if let key, headers.contains(where: { $0.lowercased().hasPrefix("upgrade:") && $0.lowercased().contains("websocket") }) {
-                sendAll(fd, WebSocket.handshake(key: key))
-                keep = true
-                upgrade(request, fd)
-                return
-            }
+        var request = HTTPRequest(method: String(parts[0]), path: percentDecode(path), query: query)
+        for field in headText.split(separator: "\r\n").dropFirst() {
+            guard let colon = field.firstIndex(of: ":") else { continue }
+            request.headers[field[..<colon].lowercased()] = field[field.index(after: colon)...].trimmingCharacters()
         }
-        let response = request.method == "GET" ? handler(request) : .text("method not allowed", status: 405)
-        let reason = [200: "OK", 400: "Bad Request", 404: "Not Found", 405: "Method Not Allowed", 500: "Internal Server Error"][response.status] ?? "OK"
+        // WebSocket upgrade: hand the connection over after the handshake.
+        if let upgrade, request.method == "GET", let key = request.headers["sec-websocket-key"],
+           request.headers["upgrade"]?.lowercased().contains("websocket") == true {
+            sendAll(fd, WebSocket.handshake(key: key))
+            keep = true
+            upgrade(request, fd)
+            return
+        }
+        var response: HTTPResponse
+        switch request.method {
+        case "GET":
+            response = handler(request)
+        case "POST":
+            guard let length = request.headers["content-length"].flatMap({ Int($0) }), length >= 0 else {
+                response = .text("Content-Length required", status: 411)
+                break
+            }
+            guard length <= maxBody else {
+                response = .text("too large (limit \(maxBody >> 20) MB)", status: 413)
+                break
+            }
+            var body = Array(received[(end + 4)...].prefix(length))
+            body.reserveCapacity(length)
+            var chunk = [UInt8](repeating: 0, count: 1 << 20)
+            while body.count < length {
+                let n = chunk.withUnsafeMutableBytes { recv(fd, $0.baseAddress, min($0.count, length - body.count), 0) }
+                if n <= 0 { return }
+                body += chunk[0..<n]
+            }
+            request.body = body
+            response = handler(request)
+        default:
+            response = .text("method not allowed", status: 405)
+        }
+        let reason = [200: "OK", 400: "Bad Request", 403: "Forbidden", 404: "Not Found", 405: "Method Not Allowed",
+                      411: "Length Required", 413: "Payload Too Large", 500: "Internal Server Error"][response.status] ?? "OK"
         let head = "HTTP/1.1 \(response.status) \(reason)\r\nContent-Type: \(response.contentType)\r\n"
             + "Content-Length: \(response.body.count)\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n"
         sendAll(fd, Array(head.utf8))

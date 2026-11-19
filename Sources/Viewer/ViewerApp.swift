@@ -59,12 +59,16 @@ final class SkeletonContext: @unchecked Sendable {
 public final class ViewerApp: Sendable {
     let config: ViewerConfiguration
     let robots: [(name: String, model: RobotModel)]
-    /// The SOMA skeleton (nil with a custom skeleton config, or without the baked surface).
+    /// The SOMA skeleton (nil with a custom BVH skeleton config, or without the baked surface).
     let soma: SkeletonContext?
+    /// Custom BVH skeleton config: .bvh files are read with it instead of as SOMA.
+    let bvhConfig: SkeletonConfig?
     /// Custom skeletons seen so far, by `SkeletonConfig.signature`.
     let contexts: Mutex<[String: SkeletonContext]>
-    /// SMPL-family clips (skeleton config format "smpl"): the body model.
+    /// SMPL-family clips (.npz / .pkl): the --skeleton config when it is an SMPL one, else Configs/skeletons/smplx.json.
     let smpl: SMPLSource?
+    /// Serialises uploads (choosing a free name, writing).
+    let uploads = Mutex(())
     /// GPU skinning and retargeting; slang-rhi devices are not thread-safe, so requests take turns.
     let gpu: Mutex<GPUState?>
 
@@ -81,9 +85,12 @@ public final class ViewerApp: Sendable {
             ($0.0, try RobotUSDLoader.load(directory: g1 + "/" + $0.1, name: $0.0))
         }
         contexts = Mutex([:])
-        smpl = config.skeleton.flatMap { $0.format == "smpl" ? SMPLSource(config: $0, repository: config.repositoryRoot) : nil }
+        bvhConfig = config.skeleton?.format == "bvh" ? config.skeleton : nil
+        let smplConfig = config.skeleton?.format == "smpl" ? config.skeleton
+            : try? SkeletonConfig.load(file: config.repositoryRoot + "/Configs/skeletons/smplx.json")
+        smpl = smplConfig.map { SMPLSource(config: $0, repository: config.repositoryRoot) }
         var soma: SkeletonContext?
-        if config.skeleton == nil, let surface = try? BodySurface.load(file: config.repositoryRoot + "/assets/body_models/soma/surface_lo.npz") {
+        if bvhConfig == nil, let surface = try? BodySurface.load(file: config.repositoryRoot + "/assets/body_models/soma/surface_lo.npz") {
             let rig = config.repositoryRoot + "/assets/body_models/soma/seed_soma_shapes/soma_base_rig/soma_base_skel_minimal.bvh"
             soma = try? SkeletonContext(key: "soma", skeleton: try? BVH.load(file: rig).skeleton, surface: surface) {
                 try BVH.load(file: $0)
@@ -125,14 +132,15 @@ public final class ViewerApp: Sendable {
             geometry: try RobotGeometry(robot: model, pointsFile: directory + "/mesh_points.npz"))
     }
 
-    /// The skeleton a clip is read with (custom: built the first time a clip of that skeleton is opened).
+    /// SMPL-family parameter file (by extension).
+    static func isSMPL(_ path: String) -> Bool { path.hasSuffix(".npz") || path.hasSuffix(".pkl") }
+
+    /// The skeleton a clip is read with, by its extension: SMPL files with the SMPL config, BVH files with the custom
+    /// BVH config or as SOMA. Custom ones are built the first time a clip of that skeleton (or SMPL shape) is opened.
     func context(_ path: String) throws -> SkeletonContext {
-        guard let config = config.skeleton else {
-            guard let soma else { throw ComputeError(message: "no body surface (run ./setup.sh)") }
-            return soma
-        }
         let made: SkeletonContext
-        if let smpl {
+        if Self.isSMPL(path) {
+            guard let smpl else { throw ComputeError(message: "SMPL files need Configs/skeletons/smplx.json") }
             // One body per gender and shape.
             let (clip, motion) = try smpl.load(file: path)
             let key = SkeletonConfig.signature(motion.skeleton)
@@ -142,6 +150,10 @@ public final class ViewerApp: Sendable {
             print("viewer: SMPL body \(key) (\(clip.gender), \(clip.layout)) from \(path), reference "
                   + (body.frame.map { "frame \($0)" } ?? "rest pose"))
         } else {
+            guard let config = bvhConfig else {
+                guard let soma else { throw ComputeError(message: "no body surface (run ./setup.sh)") }
+                return soma
+            }
             let raw = try BVH.loadSkeleton(file: path, options: config.rawOptions)
             let key = SkeletonConfig.signature(raw)
             if let known = contexts.withLock({ $0[key] }) { return known }
@@ -167,8 +179,10 @@ public final class ViewerApp: Sendable {
 
     public func run() throws -> Never {
         print("viewer: http://127.0.0.1:\(config.port)/  (motions from \(config.motionRoot))")
-        if let skeleton = config.skeleton { print("viewer: custom skeleton \(skeleton.name): bodies generated per skeleton") }
-        else if soma == nil { print("viewer: no body surface (run ./setup.sh); skeleton only") }
+        if let skeleton = bvhConfig { print("viewer: .bvh as custom skeleton \(skeleton.name): bodies generated per skeleton") }
+        else if soma == nil { print("viewer: no body surface (run ./setup.sh); SOMA skeleton only") }
+        if let smpl { print("viewer: .npz / .pkl as SMPL-family clips (\(smpl.config.name)): SMPL-X body per gender and shape") }
+        print("viewer: drop clip files on the page to upload them into \(config.motionRoot)/uploads")
         print("viewer: contact analysis on \(gpu.withLock { $0 == nil } ? "CPU (no GPU device)" : "GPU (\(Backend.gpu))")")
         let server = HTTPServer(port: config.port) { [self] request in self.handle(request) }
         try server.run()
@@ -201,6 +215,8 @@ public final class ViewerApp: Sendable {
             guard let dir = request.query["dir"], let path = safePath(dir) else { return .text("bad dir", status: 400) }
             let files = listDirectory(path).filter { !$0.isDirectory && isClip($0.name) }.map { JSON.string($0.name) }
             return .json(JSON.array(files).text)
+        case "/api/upload":
+            return upload(request)
         case "/api/human":
             guard let file = request.query["file"], let path = safePath(file) else { return .text("bad file", status: 400) }
             return human(path)
@@ -228,8 +244,8 @@ public final class ViewerApp: Sendable {
 
     func robot(_ name: String?) -> RobotModel? { robots.first { $0.name == name }?.model }
 
-    /// A clip file of the configured kind (.bvh; .npz / .pkl for SMPL parameter files).
-    func isClip(_ name: String) -> Bool { (config.skeleton?.extensions ?? [".bvh"]).contains(where: name.hasSuffix) }
+    /// A clip file the viewer reads (.bvh; .npz / .pkl SMPL parameter files).
+    func isClip(_ name: String) -> Bool { name.hasSuffix(".bvh") || (smpl != nil && Self.isSMPL(name)) }
 
     /// Resolves a path relative to the motion root, refusing anything that could escape it.
     func safePath(_ relative: String) -> String? {
@@ -293,11 +309,64 @@ public final class ViewerApp: Sendable {
         return payload.response
     }
 
+    /// POST /api/upload?name=FILE (body: the file): saves a dropped clip under <motion root>/uploads and checks that
+    /// it reads. Only the viewer's own page may upload: it sends X-Retargeter-Upload, which a cross-site request cannot
+    /// without a CORS preflight that this server never grants, and a browser's Origin must be this server.
+    func upload(_ request: HTTPRequest) -> HTTPResponse {
+        guard request.method == "POST" else { return .text("POST the file", status: 405) }
+        guard request.headers["x-retargeter-upload"] == "1" else { return .text("missing X-Retargeter-Upload", status: 403) }
+        if let origin = request.headers["origin"],
+           !["http://127.0.0.1:\(config.port)", "http://localhost:\(config.port)"].contains(origin) {
+            return .text("cross-origin upload refused", status: 403)
+        }
+        // Base name only, from a safe character set; no hidden files.
+        let raw = String((request.query["name"] ?? "").split(separator: "/").last ?? "")
+        let name = String(raw.unicodeScalars.map { s -> Character in
+            s.properties.isAlphabetic || ("0"..."9").contains(s) || "._-()".unicodeScalars.contains(s) ? Character(s) : "_"
+        })
+        guard !name.isEmpty, !name.hasPrefix("."), isClip(name) else {
+            return .text("\(raw): not a clip this viewer reads (.bvh\(smpl != nil ? ", .npz, .pkl" : ""))", status: 400)
+        }
+        guard !request.body.isEmpty else { return .text("\(name): empty file", status: 400) }
+        let directory = config.motionRoot + "/uploads"
+        let saved: String
+        do {
+            saved = try uploads.withLock { _ -> String in
+                mkdir(directory, 0o755)
+                // An identical file already there is reused; a different one with the same name gets a suffix.
+                let dot = name.lastIndex(of: ".")!
+                var candidate = name, k = 1
+                while let existing = readFile(directory + "/" + candidate) {
+                    if existing == request.body { return candidate }
+                    k += 1
+                    candidate = name[..<dot] + "_\(k)" + name[dot...]
+                }
+                let temporary = directory + "/.upload_\(getpid())_" + candidate
+                guard let f = fopen(temporary, "wb") else { throw ComputeError(message: "cannot write \(directory)") }
+                let written = request.body.withUnsafeBytes { fwrite($0.baseAddress, 1, $0.count, f) }
+                fclose(f)
+                guard written == request.body.count, rename(temporary, directory + "/" + candidate) == 0 else {
+                    unlink(temporary)
+                    throw ComputeError(message: "cannot write \(directory)/\(candidate)")
+                }
+                return candidate
+            }
+        } catch { return .text("\(error)", status: 500) }
+        // A file that does not read is not kept.
+        let path = directory + "/" + saved
+        do { _ = try load(path) } catch {
+            unlink(path)
+            return .text("\(name): " + "\(error)".replacing(path + ": ", with: "").replacing(path, with: "uploads/" + saved), status: 400)
+        }
+        print("viewer: uploaded \(path) (\(request.body.count) bytes)")
+        return .json(JSON.object([("dir", .string("uploads")), ("file", .string(saved))]).text)
+    }
+
     func human(_ path: String) -> HTTPResponse {
         // Without a body (no SOMA surface) the skeleton still shows: read the clip plainly.
         let skeleton: SkeletonContext?, motion: HumanMotion
         do {
-            skeleton = config.skeleton == nil && soma == nil ? nil : try context(path)
+            skeleton = bvhConfig == nil && soma == nil && !Self.isSMPL(path) ? nil : try context(path)
             motion = try skeleton?.read(path) ?? BVH.load(file: path)
         } catch { return .text("\(error)", status: 400) }
         var pos: [Float] = [], rot: [Float] = []

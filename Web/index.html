@@ -45,6 +45,8 @@
       <select id="dir"></select>
       <select id="file"></select>
     </label>
+    <button id="uploadButton" title="Upload clip files (or drop them anywhere on the page)">Upload…</button>
+    <input type="file" id="uploadInput" multiple accept=".bvh,.npz,.pkl" hidden>
     <label>Contacts
       <select id="contactMode">
         <option value="offline">Offline</option>
@@ -75,6 +77,8 @@
   <label class="check"><input type="checkbox" id="loop" checked> Loop</label>
   <span id="status"></span>
 </footer>
+
+<div id="drop" hidden><div>Drop .bvh / .npz / .pkl clips to upload and open them</div></div>
 
 <script type="module" src="/web/viewer.js"></script>
 </body>

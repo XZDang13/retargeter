@@ -13,6 +13,7 @@ const ui = {
   dir: $('dir'), file: $('file'), showSurface: $('showSurface'), showSkeleton: $('showSkeleton'),
   contactMode: $('contactMode'), tracks: $('tracks'), trackCanvas: $('trackCanvas'),
   play: $('play'), scrub: $('scrub'), time: $('time'), speed: $('speed'), loop: $('loop'), status: $('status'),
+  uploadButton: $('uploadButton'), uploadInput: $('uploadInput'), drop: $('drop'),
 };
 const SIDE_OFFSET = new THREE.Vector3(0, 1.2, 0); // human shown to the robot's left in side-by-side layout
 
@@ -525,6 +526,59 @@ async function loadFiles(dir, selected) {
   fillSelect(ui.file, files, selected);
   if (files.length) await loadHuman(`${dir}/${ui.file.value}`);
 }
+
+// ---------------------------------------------------------------------------------------------
+// Uploads: clip files dropped on the page (or picked with Upload…) are saved under <motions>/uploads on the server,
+// which checks that each one reads; the last one that does is opened.
+
+async function uploadFiles(files) {
+  if (!files.length) return;
+  let last = null;
+  const errors = [];
+  for (const [i, file] of files.entries()) {
+    ui.status.textContent = `uploading ${file.name} (${i + 1}/${files.length}, ${(file.size / 1e6).toFixed(1)} MB)…`;
+    try {
+      const response = await fetch(`/api/upload?name=${encodeURIComponent(file.name)}`,
+        { method: 'POST', body: file, headers: { 'X-Retargeter-Upload': '1' } });
+      if (response.ok) last = await response.json();
+      else errors.push(await response.text());   // the server's message names the file
+    } catch (e) {
+      errors.push(`${file.name}: ${e.message}`);
+    }
+  }
+  if (last) {
+    fillSelect(ui.dir, await fetchJSON('/api/dirs'), last.dir);
+    await loadFiles(last.dir, last.file);
+  }
+  if (errors.length) {
+    console.error('upload failed:', errors);
+    ui.status.textContent = (last ? `${ui.status.textContent} · ` : '') + `upload failed: ${errors.join('; ')}`;
+  }
+}
+
+const dragsFiles = (e) => [...(e.dataTransfer?.types ?? [])].includes('Files');
+let dragDepth = 0;   // dragenter / dragleave fire for every child element crossed
+window.addEventListener('dragenter', (e) => { if (dragsFiles(e)) { dragDepth++; ui.drop.hidden = false; } });
+window.addEventListener('dragleave', (e) => {
+  if (dragsFiles(e) && --dragDepth <= 0) { dragDepth = 0; ui.drop.hidden = true; }
+});
+window.addEventListener('dragover', (e) => {
+  if (!dragsFiles(e)) return;
+  e.preventDefault();   // allows the drop (the browser would otherwise open the file)
+  e.dataTransfer.dropEffect = 'copy';
+});
+window.addEventListener('drop', (e) => {
+  if (!dragsFiles(e)) return;
+  e.preventDefault();
+  dragDepth = 0;
+  ui.drop.hidden = true;
+  uploadFiles([...e.dataTransfer.files]);
+});
+ui.uploadButton.addEventListener('click', () => ui.uploadInput.click());
+ui.uploadInput.addEventListener('change', () => {
+  uploadFiles([...ui.uploadInput.files]);
+  ui.uploadInput.value = '';   // picking the same file again fires change again
+});
 
 async function init() {
   setPlaying(true);

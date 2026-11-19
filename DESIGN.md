@@ -561,6 +561,15 @@ client's BVH reader applies the same conversion as the server's. Times are `CLOC
 - Sources: npz results, raw BVH / SMPL-X, the manifest (browse a batch, filter by status), and
   **live** teleop streams.
 - Robot meshes: one-time export of `geometries.usd` → glTF (Python `usd-core` script in `tools/`).
+- Clip formats by extension: `.bvh` as SOMA (or the `--skeleton` BVH config), `.npz` / `.pkl` as SMPL-family clips
+  (§17; the `--skeleton` SMPL config, else `Configs/skeletons/smplx.json`), so one viewer shows both.
+- Uploads (2026-11-19): files dropped on the page (or picked with Upload…) are POSTed raw to
+  `/api/upload?name=FILE` (the server reads POST bodies with a Content-Length, up to 256 MB), saved under
+  `<motion root>/uploads/` (base name only, safe characters, no hidden files; an identical file is reused, a
+  different one with the same name gets `_2`, `_3`, ...), opened once to check that it reads (else deleted and the
+  error returned), and the last good one is opened. Cross-site requests are refused: the page sends
+  `X-Retargeter-Upload: 1`, which another site's page cannot send without a CORS preflight the server never grants,
+  and a browser Origin other than this server's is rejected.
 - *Live (M6):* `retarget teleop --viewer-port N` serves `Web/live.html`; the server pushes, per open stream and
   at most 60 Hz, the robot's link transforms and the human joint positions as binary WebSocket frames (`/ws`;
   handshake and framing in `Sources/Viewer/WebSocket.swift`), plus a JSON message when streams open or close.

@@ -114,3 +114,9 @@ build/release/retarget view --port 8080 --motions ~/Downloads/soma_uniform/bvh
 ```
 
 Open http://127.0.0.1:8080/. Space toggles playback; ←/→ step frames.
+
+The viewer opens `.bvh` clips (as SOMA, or with `--skeleton` a custom BVH config) and SMPL-family `.npz` / `.pkl`
+clips (with `Configs/skeletons/smplx.json` unless `--skeleton` names another SMPL config) side by side. To look at a
+new clip, drop the files anywhere on the page (or use **Upload…**): they are saved in `<motions>/uploads/`, checked
+that they read (a file that does not is refused and not kept), and the last one is opened. Uploads are only
+accepted from the viewer's own page on 127.0.0.1.
