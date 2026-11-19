@@ -59,7 +59,8 @@ final class SkeletonContext: @unchecked Sendable {
 public final class ViewerApp: Sendable {
     let config: ViewerConfiguration
     let robots: [(name: String, model: RobotModel)]
-    /// The SOMA skeleton (nil with a custom BVH skeleton config, or without the baked surface).
+    /// The SOMA body with the base rig (nil with a custom BVH skeleton config, or without the baked surface): the
+    /// default body and the kernel warm-up; clips get a context per own skeleton (`context`).
     let soma: SkeletonContext?
     /// Custom BVH skeleton config: .bvh files are read with it instead of as SOMA.
     let bvhConfig: SkeletonConfig?
@@ -106,7 +107,8 @@ public final class ViewerApp: Sendable {
                 let directory = config.repositoryRoot + "/assets/robots/unitree_g1/" + (name == "g1_29dof" ? "g1_29_dof" : "g1_23_dof")
                 state?.validators[name] = try? Validator.load(repository: config.repositoryRoot, robot: model, robotDirectory: directory)
             }
-            // SOMA's retargeters up front (their kernels compile once; later skeletons reuse them).
+            // Retargeters for the SOMA base rig up front: their kernels compile once, and the per-clip skeletons
+            // (`context`) reuse them.
             if let soma, soma.skeleton != nil {
                 for (name, model) in robots {
                     do { try Self.prepareGPU(soma, robot: name, model: model, device: device, repository: config.repositoryRoot) }
@@ -151,11 +153,7 @@ public final class ViewerApp: Sendable {
             made = try SkeletonContext(key: key, skeleton: motion.skeleton, surface: body.surface) { try smpl.load(file: $0).motion }
             print("viewer: SMPL body \(key) (\(clip.gender), \(clip.layout)) from \(path), reference "
                   + (body.frame.map { "frame \($0)" } ?? "rest pose"))
-        } else {
-            guard let config = bvhConfig else {
-                guard let soma else { throw ComputeError(message: "no body surface (run ./setup.sh)") }
-                return soma
-            }
+        } else if let config = bvhConfig {
             let raw = try BVH.loadSkeleton(file: path, options: config.rawOptions)
             let key = SkeletonConfig.signature(raw)
             if let known = contexts.withLock({ $0[key] }) { return known }
@@ -164,6 +162,15 @@ public final class ViewerApp: Sendable {
             let body = try CustomBody.make(motion, config: config)
             made = try SkeletonContext(key: key, skeleton: motion.skeleton, surface: body.surface) { try BVH.load(file: $0, options: options) }
             print("viewer: skeleton \(key) (\(motion.skeleton.jointCount) joints) from \(path), reference frame \(body.frame)")
+        } else {
+            // SOMA: the baked body with the clip's own skeleton (its bone lengths set the mapping's scales), as the
+            // batch commands use it, so a download equals `retarget offline` on the clip.
+            guard let soma else { throw ComputeError(message: "no body surface (run ./setup.sh)") }
+            let skeleton = try BVH.loadSkeleton(file: path)
+            let key = "soma-" + SkeletonConfig.signature(skeleton)
+            if let known = contexts.withLock({ $0[key] }) { return known }
+            made = try SkeletonContext(key: key, skeleton: skeleton, surface: soma.surface) { try BVH.load(file: $0) }
+            print("viewer: SOMA skeleton \(key) (\(skeleton.jointCount) joints) from \(path)")
         }
         let key = made.key
         return contexts.withLock { known in

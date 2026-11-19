@@ -573,9 +573,10 @@ client's BVH reader applies the same conversion as the server's. Times are `CLOC
 - Downloads (2026-11-19): **Download .npz** fetches `/api/download?name=ROBOT&file=CLIP&mode=offline|realtime`,
   which returns `RobotMotionExport.archive` (the batch commands' .npz, 50 fps, validation status, metrics and
   dynamics) as an attachment named `<clip>_<robot>[_realtime].npz`. The server keeps its last solve
-  (robot, mode, clip), so the download is the motion on screen, not a new solve. SOMA clips are solved against the
-  base rig here, whereas the batch commands use the first clip's skeleton, so a download can differ from
-  `retarget offline` on the same clip by about 1 mrad in joint angles (and more in the torques derived from them).
+  (robot, mode, clip), so the download is the motion on screen, not a new solve. Each SOMA clip is solved with its
+  own skeleton (one context per skeleton signature, sharing the baked body), as `retarget offline` / `realtime` on
+  that clip do, so a download is bit-identical to theirs (checked on 3 clips, both modes; only `source` differs).
+  The base rig, used before, gave about 1 mrad in joint angles and up to 17 Nm in torques of difference.
 - *Live (M6):* `retarget teleop --viewer-port N` serves `Web/live.html`; the server pushes, per open stream and
   at most 60 Hz, the robot's link transforms and the human joint positions as binary WebSocket frames (`/ws`;
   handshake and framing in `Sources/Viewer/WebSocket.swift`), plus a JSON message when streams open or close.
