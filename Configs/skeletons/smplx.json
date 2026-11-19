@@ -1,0 +1,45 @@
+// SMPL-family parameter files (.npz / .pkl), one config for all layouts (DESIGN §17): AMASS-style SMPL+H (poses with
+// 52 joints), SMPL-X (55), plain SMPL (24) or a separate root + body (OMOMO's root_orient + pose_body). Every layout
+// is read into the SMPL-X joint order and posed with the SMPL-X model for the clip's shape (betas) and gender, which
+// gives both the skeleton and the body surface (the skinned mesh); export the model once with
+// `python tools/export_smplx_model.py`.
+{
+  "name": "smplx",
+  "format": "smpl",
+  // Body model; {gender} is the clip's (neutral / male / female).
+  "model": "assets/body_models/smplx/smplx_lbs_{gender}.npz",
+  // "file": each clip's own gender (neutral when it has none), or force one of neutral / male / female.
+  "gender": "file",
+  // World up axis of the files: "y" (camera-frame fits), "z" (AMASS, OMOMO) or "auto" (per clip, from the pelvis's
+  // up direction).
+  "up": "auto",
+  "units": 1.0,
+  // Frame rate of files that do not store one.
+  "fps": 30,
+  // Role -> candidate keys (the first present wins). A file with both root and body is read from those (its poses
+  // are ignored: OMOMO's poses holds the body only, without the root); otherwise from poses, root first, with the
+  // root key overriding the first joint when present (flowhmr's Rh).
+  "keys": {
+    "root": ["root_orient", "global_orient", "Rh"],
+    "body": ["pose_body", "body_pose"],
+    "hands": ["pose_hand", "hand_pose"],
+    "poses": ["poses", "fullpose", "full_pose"],
+    "trans": ["trans", "transl"],
+    "betas": ["betas", "shapes", "beta"],
+    "gender": ["gender"],
+    "fps": ["mocap_frame_rate", "mocap_framerate", "fps", "frame_rate", "framerate"]
+  },
+  // Canonical joint (the names the mappings use) -> SMPL-X joint.
+  "joints": {
+    "Hips": "pelvis",
+    "Chest": "spine3",
+    "Head": "head",
+    "LeftLeg": "left_hip",          "RightLeg": "right_hip",
+    "LeftShin": "left_knee",        "RightShin": "right_knee",
+    "LeftFoot": "left_ankle",       "RightFoot": "right_ankle",
+    "LeftToeBase": "left_foot",     "RightToeBase": "right_foot",
+    "LeftArm": "left_shoulder",     "RightArm": "right_shoulder",
+    "LeftForeArm": "left_elbow",    "RightForeArm": "right_elbow",
+    "LeftHand": "left_wrist",       "RightHand": "right_wrist"
+  }
+}

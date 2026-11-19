@@ -223,6 +223,18 @@ else
     fi
 fi
 
+step "SMPL-X body model (optional: SMPL / SMPL+H / SMPL-X clips)"
+# The official model files are licensed (download from smpl-x.is.tue.mpg.de into assets/body_models/smplx/); the
+# retargeter reads plain arrays exported from them (tools/export_smplx_model.py, numpy only, gitignored like the models).
+smplx_dir=assets/body_models/smplx
+if ! compgen -G "$smplx_dir/SMPLX_*.npz" >/dev/null; then
+    note "skipped: no SMPLX_*.npz in $smplx_dir/ (only needed for --skeleton Configs/skeletons/smplx.json)"
+elif [[ -f $smplx_dir/smplx_lbs_neutral.npz && $force == 0 ]]; then
+    note "$smplx_dir/smplx_lbs_*.npz exist"
+else
+    "$venv/bin/python" -I tools/export_smplx_model.py --models "$smplx_dir"
+fi
+
 step "Done"
 if [[ $xmake == "$tool_bin/xmake" ]]; then
     note "xmake was fetched into $tools/bin; to use it (and uv) directly: export PATH=\"$tool_bin:\$PATH\""

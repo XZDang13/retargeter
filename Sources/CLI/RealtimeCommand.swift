@@ -35,7 +35,7 @@ struct RealtimeCommand {
     var skeletonConfig: String?
 
     static let usage = """
-    usage: retarget realtime|offline <bvh files or directories>... [options]
+    usage: retarget realtime|offline <clip files or directories>... [options]
       realtime: causal solver (lag 0, what teleop sees); offline: whole-trajectory solver with stance-foot
       locking, ground contact / non-penetration and self-collision terms, warm-started from realtime.
       --robot NAME        g1_29dof (default) | g1_23dof
@@ -57,7 +57,9 @@ struct RealtimeCommand {
       --lag-rate HZ       window solves per second of input (default 50, the policy rate; 0: every frame)
       --skeleton FILE     custom skeleton config (e.g. Configs/skeletons/lafan1.json): units, up axis and which joints
                           are the canonical ones; each distinct skeleton in the input gets its own reference pose and
-                          capsule body (default: SOMA uniform skeleton, baked body surface)
+                          capsule body (default: SOMA uniform skeleton, baked body surface).
+                          Configs/skeletons/smplx.json reads SMPL / SMPL+H / SMPL-X parameter files (.npz, .pkl)
+                          instead, posed with the SMPL-X model (one body per gender and shape)
     """
 
     init(mode: String, arguments: [String]) throws {
@@ -95,8 +97,9 @@ struct RealtimeCommand {
         guard !inputs.isEmpty else { throw CLIError("no input files") }
     }
 
-    /// (absolute path, path relative to its input root) for every selected BVH file.
-    func collectFiles() -> [(path: String, relative: String)] {
+    /// (absolute path, path relative to its input root) for every selected clip file (.bvh, or what the skeleton
+    /// config reads).
+    func collectFiles(extensions: [String] = [".bvh"]) -> [(path: String, relative: String)] {
         var files: [(String, String)] = []
         func matches(_ name: String, _ patterns: [String]) -> Bool { patterns.contains { fnmatch($0, name, 0) == 0 } }
         func visit(_ path: String, relative: String) {
@@ -106,7 +109,7 @@ struct RealtimeCommand {
                 for entry in listDirectory(path) {
                     visit(path + "/" + entry.name, relative: relative.isEmpty ? entry.name : relative + "/" + entry.name)
                 }
-            } else if path.hasSuffix(".bvh") {
+            } else if extensions.contains(where: path.hasSuffix) {
                 let name = String(path.split(separator: "/").last!)
                 if (!include.isEmpty && !matches(name, include)) || matches(name, exclude) { return }
                 files.append((path, relative.isEmpty ? name : relative))
@@ -128,7 +131,8 @@ struct RealtimeCommand {
         let configHash = hash(readFile(mappingFile) ?? []) + "-" + RobotMotionExport.version
         let device = try ComputeDevice.makeDefault(backend: backend)
 
-        let files = collectFiles()
+        let config = try skeletonConfig.map { try SkeletonConfig.load(file: $0) }
+        let files = collectFiles(extensions: config?.extensions ?? [".bvh"])
         let todo = files.filter { file in
             overwrite || !["", "accepted/", "rejected/"].contains { access(output + "/" + $0 + stem(file.relative) + ".npz", F_OK) == 0 }
         }
@@ -139,17 +143,18 @@ struct RealtimeCommand {
         defer { if let manifest { fclose(manifest) } }
 
         let geometry = try RobotGeometry(robot: model, pointsFile: directory + "/mesh_points.npz")
-        guard let skeletonConfig else {
+        guard let config else {
             let surface = try BodySurface.load(file: repository + "/assets/body_models/soma/surface_lo.npz")
-            return try process(todo, options: BVHOptions(), surface: surface)
+            return try process(todo, surface: surface) { try BVH.load(file: $0) }
         }
-        // Custom skeletons: clips grouped by skeleton (joints and bone lengths); each group's reference pose and body
-        // come from its first clip.
-        let config = try SkeletonConfig.load(file: skeletonConfig)
+        // Custom skeletons: clips grouped by skeleton (joints and bone lengths; for SMPL files gender and shape); each
+        // group's reference pose and body come from its first clip.
         var groups: [(key: String, files: [(path: String, relative: String)], skeleton: HumanSkeleton)] = []
+        let smpl = config.format == "smpl" ? SMPLSource(config: config, repository: repository) : nil
         for file in todo {
             do {
-                let skeleton = try BVH.loadSkeleton(file: file.path, options: config.rawOptions)
+                let skeleton = try smpl.map { try $0.load(file: file.path).motion.skeleton }
+                    ?? BVH.loadSkeleton(file: file.path, options: config.rawOptions)
                 let key = SkeletonConfig.signature(skeleton)
                 if let g = groups.firstIndex(where: { $0.key == key }) { groups[g].files.append(file) }
                 else { groups.append((key, [file], skeleton)) }
@@ -158,21 +163,34 @@ struct RealtimeCommand {
             }
         }
         for (k, group) in groups.enumerated() {
-            let options: BVHOptions, body: (surface: BodySurface, frame: Int)
+            let load: @Sendable (String) throws -> HumanMotion, surface: BodySurface, detail: String
             do {
-                options = try config.bvhOptions(for: group.skeleton)
-                body = try CustomBody.make(try BVH.load(file: group.files[0].path, options: options), config: config)
+                if let smpl {
+                    let first = try smpl.load(file: group.files[0].path)
+                    let body = try smpl.surface(for: first.clip, motion: first.motion)
+                    surface = body.surface
+                    load = { try smpl.load(file: $0).motion }
+                    detail = "\(first.clip.gender), \(first.clip.layout), \(first.clip.fps) fps, reference "
+                        + (body.frame.map { "frame \($0) of \(group.files[0].relative)" } ?? "rest pose")
+                } else {
+                    let options = try config.bvhOptions(for: group.skeleton)
+                    let body = try CustomBody.make(try BVH.load(file: group.files[0].path, options: options), config: config)
+                    surface = body.surface
+                    load = { try BVH.load(file: $0, options: options) }
+                    detail = "reference frame \(body.frame) of \(group.files[0].relative)"
+                }
             } catch {
                 print("\(mode): skeleton \(k + 1)/\(groups.count) (\(group.files.count) clips) skipped: \(error)")
                 for file in group.files { log(manifest, file.path, status: "error", detail: "\(error)") }
                 continue
             }
             print("\(mode): skeleton \(k + 1)/\(groups.count): \(group.files.count) clips, \(group.skeleton.jointCount) joints, "
-                  + "reference frame \(body.frame) of \(group.files[0].relative), \(body.surface.vertexCount) body points")
-            try process(group.files, options: options, surface: body.surface)
+                  + "\(detail), \(surface.vertexCount) body points")
+            try process(group.files, surface: surface, load: load)
         }
 
-        func process(_ todo: [(path: String, relative: String)], options: BVHOptions, surface: BodySurface) throws {
+        func process(_ todo: [(path: String, relative: String)], surface: BodySurface,
+                     load loadMotion: @escaping @Sendable (String) throws -> HumanMotion) throws {
         let start = ContinuousClock.now
         var done = 0, failed = 0, frames = 0, rejected = 0, ticks = 0
         var timing: (prepare: Duration, solve: Duration, sweeps: Duration, validate: Duration) = (.zero, .zero, .zero, .zero)
@@ -184,7 +202,7 @@ struct RealtimeCommand {
         func load(_ chunk: [(path: String, relative: String)]) -> (loaded: Loaded, failed: Int) {
             var loaded: Loaded = [], failures = 0
             for file in chunk {
-                do { loaded.append((file, try BVH.load(file: file.path, options: options))) } catch {
+                do { loaded.append((file, try loadMotion(file.path))) } catch {
                     failures += 1
                     log(manifest, file.path, status: "error", detail: "\(error)")
                 }

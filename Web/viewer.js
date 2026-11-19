@@ -196,7 +196,7 @@ function buildBody(surface) {
     geometry.setIndex(new THREE.BufferAttribute(new Uint32Array(blocks.triangles), 1));
     body = new THREE.Mesh(geometry, new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.7, transparent: true, opacity: 0.85 }));
   } else {
-    // Generated bodies (custom skeletons) are points on capsules, without triangles.
+    // Generated bodies (custom BVH skeletons) are points on capsules, without triangles.
     body = new THREE.Points(geometry, new THREE.PointsMaterial({ vertexColors: true, size: 0.012, transparent: true, opacity: 0.85 }));
   }
   body.frustumCulled = false;

@@ -31,7 +31,8 @@ backends are v2 — the design keeps them possible but does not build them.
 See `docs/retargeting-survey.md` for the survey of existing tools that informed §5a–§9.
 
 **SMPL-X** — model files already in `assets/body_models/smplx/` (neutral/male/female `.npz`).
-Input clips are AMASS-style npz (`poses`, `trans`, `betas`, fps).
+Input clips are SMPL-family parameter files: AMASS-style npz (`poses`, `trans`, `betas`, fps), OMOMO's pickles
+(`root_orient` + `pose_body`), camera-frame HMR fits; one config reads them all (§17).
 
 **Robots** — `assets/robots/unitree_g1/g1_{23,29}_dof/` are USD (converted from MuJoCo MJCF):
 - Z-up, metres. `physics.usda` has per-link mass, CoM, diagonal inertia; joint limits (degrees).
@@ -104,7 +105,7 @@ Languages:
   plus cached global transforms.
 - Loaders normalise to metres, Z-up, fixed forward axis. BVH parse is a hot path for 142k clips →
   fast hand-written parser + optional binary cache.
-- SMPL-X: joints from `J_regressor`·shape for given betas; body joints only (no hands in v1).
+- SMPL-X: joints from `J_regressor`·shape for given betas, all 55 joints (SMPL / SMPL+H layouts mapped into them, §17).
 - The solvers never see a specific skeleton — only "target bodies" produced by the mapping.
 
 **Body surface proxy** (`BodySurface`, used for ground and contact detection, §5a):
@@ -134,7 +135,8 @@ Languages:
   ]
 }
 ```
-Shipped: `soma77 × g1_23`, `soma77 × g1_29`, `smplx × g1_23`, `smplx × g1_29`.
+Shipped: `soma77 × g1_23`, `soma77 × g1_29`; other skeletons (§16) and SMPL-family clips (§17) use them through the
+canonical joint names.
 
 Also in the mapping: `contacts` — which human contact groups map to which robot contact patches
 (e.g. heel/toe → sole corners, knee → knee sphere, hand → wrist/hand sphere, pelvis → pelvis box).
@@ -753,7 +755,8 @@ retargeter/
      0/8, offline 7/8); contacts, collisions, smoothness and ZMP at offline level, tracking ~1.2 cm behind, dynamics
      residual twice offline's. Live 58 ms median / 67 ms p95 end-to-end. Open: tracking, the dynamics weight's small
      margin (2x), the stairs clip.
-7. **SMPL-X** input path and mappings.
+7. **SMPL-X** input path (2026-11-19, §17): one skeleton config for SMPL / SMPL+H / SMPL-X files (.npz, .pkl),
+   posed with the SMPL-X model; the SOMA mappings serve it through the canonical joint names, no separate mapping.
 
 ## 14. Decisions log
 
@@ -1014,6 +1017,11 @@ retargeter/
   rubber hands loaded without geometry (their mesh is only a collision mesh in the USD, which the loader skipped as a
   copy of a visual), so its hands never touched, penetrated or collided in any check; collision-only meshes are now
   the link's visual. The longer-term fix is in the solver: hand support through a straight wrist, fist down.
+- SMPL-family input (2026-11-19, §17): one config (`Configs/skeletons/smplx.json`) for SMPL / SMPL+H / SMPL-X
+  `.npz` and `.pkl`, posed with the SMPL-X model (exported to plain arrays); the body is the skinned SMPL-X mesh, the
+  reference a straightened standing frame (the model's rest pose has raised collars: arm goals 5 cm too low).
+  Pickles go through a restricted reader that only builds arrays. No separate SMPL mapping: the SOMA mappings work
+  through the canonical joint names.
 
 ## 15. Open questions
 
@@ -1077,4 +1085,52 @@ the config says which joints of the skeleton those are.
   skeleton compiles its solvers: a few seconds). The browser loads a clip's body by its skeleton key and draws a
   generated body as points; a motion root holding clips directly lists as ".".
 - **Not yet:** `validate` and `teleop` still assume the SOMA skeleton.
+
+## 17. SMPL-family clips
+
+SMPL, SMPL+H and SMPL-X parameter files retarget with one skeleton config, `Configs/skeletons/smplx.json`
+(`"format": "smpl"`): `retarget realtime|offline|view … --skeleton Configs/skeletons/smplx.json`. Every layout is read
+into the SMPL-X joint order and posed with the SMPL-X model, which gives the skeleton and the body surface for the
+clip's own shape and gender.
+
+- **Model.** The official `SMPLX_{NEUTRAL,MALE,FEMALE}.npz` are zip-compressed and hold pickled objects;
+  `tools/export_smplx_model.py` (numpy only; run by `setup.sh` when the models are present) writes
+  `smplx_lbs_<gender>.npz` with the plain LBS model: template, 16 shape components, the joint regressor applied to
+  both, parents, the 4 largest skinning weights per vertex (the largest dropped weight is 0.047), triangles. No pose
+  correctives or expressions. Licensed: gitignored like the models.
+- **Files.** `.npz` (uncompressed, as `np.savez`) or `.pkl`. Pickles are read by our own opcode interpreter
+  (`MotionIO/Pickle.swift`) that only builds numpy arrays, strings and numbers (plus `_codecs.encode` with latin-1,
+  how protocol 2 stores bytes); any other global is refused, so a file never runs code.
+- **Layouts.** The config's `keys` map roles to candidate keys (first present wins). With a root and a body key
+  (`root_orient` + `pose_body`, 21 joints, or SMPL's 23 of which the last two, its hands, are dropped) those are
+  read, plus `pose_hand` when present, and `poses` is ignored: OMOMO's `poses` holds `pose_body` padded with zeros,
+  without the root. Otherwise `poses`, root first, by joints per frame: 55 SMPL-X, 52 SMPL+H (hands to 25-54),
+  24 SMPL, 22 body; a root key (e.g. `Rh`) then overrides joint 0. Missing joints stay at zero (hands flat).
+  `betas` beyond the model's 16 are ignored; `gender` neutral / male / female (config `gender` can force one);
+  `mocap_frame_rate` and its variants, else the config `fps`.
+- **Frames.** The model is Y-up facing +Z; its rest offsets are turned into ours (Z-up, +X forward) like BVH
+  offsets. The world up axis of the files is `up`: `"y"` (camera-frame fits: the root rotation is conjugated like
+  every joint, the translation turned), `"z"` (AMASS, OMOMO: the world is ours already, the root rotation is followed
+  by the model-to-ours turn) or `"auto"` (default: per clip, the axis the pelvis's up direction, model +Y turned by
+  the root, is closest to on average). The pelvis is at `J0 + trans` (the root turns about the pelvis joint).
+- **Body.** The SMPL-X mesh (10,475 vertices) skinned with the 4 weights; contact groups from the dominant joint as on
+  SOMA (ankle → heel, foot → toe, knee split 35 % knee / shin, elbow split 30 % elbow / forearm / last 15 % hand,
+  wrist and fingers → hand, collar and shoulder → upper arm, spines → torso, neck, head, jaw → head); eyeballs are
+  excluded. The viewer draws it as a mesh.
+- **Reference pose.** From a standing frame of the group's first clip, straightened by `CustomBody.tPose` like a
+  custom BVH skeleton's (`reference.frame`: `"auto"`, an index, or `"rest"` for the model's rest pose). The rest pose
+  is a T-pose whose collars are raised for the level arms; SMPL fits lower the collars with the arms down, so from
+  the rest pose every shoulder and elbow goal hung 4.5-6 cm below the robot's shoulder (robot - goal +4.5 cm in z on
+  both test clips, SOMA +2 cm) and arm tracking was twice SOMA's. From a standing frame the collars are as held:
+  shoulder bias under 1 cm, tracking mean 2.8 → 2.1 cm (SMPL+H) and 3.0 → 1.5 cm (OMOMO), forearm rotation 15-25° →
+  2-10°.
+- **Grouping.** Clips group by skeleton signature (gender and shape), e.g. one body per OMOMO subject; as for BVH the
+  group's reference comes from its first clip, so it depends on which clips a run includes.
+- **Checked.** CoreTests `[smpl]`: joints match a numpy SMPL-X (original model, full weights) to 2e-5 m in both up
+  modes, skinned vertices to 2 mm; on the two test clips joints to 5e-8 m and vertices to 0.5 mm. RetargetTests
+  `[smpl]` (a camera-frame SMPL+H fit and an OMOMO clip): reference standing on z = 0 facing +X, upright, feet in
+  contact > 80 % of frames, tracking under 2.5 cm. Offline on both robots: both accepted (tracking 2.1-3.5 cm). Ten
+  OMOMO clips over five subjects: 9 accepted, one rejected for robot self-collision (3.1 cm, carrying a chair).
+- **Not yet:** `validate` (it looks for a `.bvh` source) and `teleop`. The SMPL+H clip's knee rotations track
+  28-38° off (positions 3-4 cm): a twist about the shin in the monocular fit, which the robot knee cannot follow.
 

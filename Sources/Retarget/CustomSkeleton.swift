@@ -23,8 +23,20 @@ public struct SkeletonConfig: Sendable {
     /// Frame of a clip whose pose (standing, feet flat) becomes the reference; nil: chosen per skeleton (the most
     /// upright frame with both feet planted and the body still).
     public var referenceFrame: Int?
+    /// smpl: reference from the body model's rest pose instead of a standing frame (reference.frame "rest").
+    public var referenceRest = false
     /// Body capsule radii (m, for a 1.75 m person; scaled by the skeleton's height), keyed like `Body.defaults`.
     public var radii: [String: Double]
+    /// File format: "bvh" (skeleton and rotations in the file) or "smpl" (SMPL-family parameters posed by a body
+    /// model, DESIGN §17).
+    public var format = "bvh"
+    /// smpl: how to read the parameter files.
+    public var smpl = SMPLOptions()
+    /// smpl: body model file, "{gender}" replaced by neutral / male / female; relative to the repository.
+    public var model = "assets/body_models/smplx/smplx_lbs_{gender}.npz"
+
+    /// File extensions of the clips.
+    public var extensions: [String] { format == "smpl" ? [".npz", ".pkl"] : [".bvh"] }
 
     /// Joints every custom skeleton must provide.
     public static let required = ["Hips", "Chest", "Head"] + ["Left", "Right"].flatMap { s in
@@ -40,27 +52,53 @@ public struct SkeletonConfig: Sendable {
             else { throw JSONError(message: "\(file): joints.\(canonical) must be a joint name or a list of names") }
         }
         let frame = json["reference"]?["frame"]
-        if let f = frame, f.string != "auto" && f.double == nil {
-            throw JSONError(message: "\(file): reference.frame must be a frame index or \"auto\"")
+        if let f = frame, f.string != "auto" && f.string != "rest" && f.double == nil {
+            throw JSONError(message: "\(file): reference.frame must be a frame index, \"auto\" or (smpl) \"rest\"")
         }
-        let up = json["up"]?.string ?? "y"
-        guard ["y", "z"].contains(up) else { throw JSONError(message: "\(file): up must be \"y\" or \"z\"") }
-        return SkeletonConfig(name: json["name"]?.string ?? "custom", unitScale: json["units"]?.double ?? 0.01,
-                              yUp: up == "y", joints: joints, referenceFrame: frame?.double.map { Int($0) },
-                              radii: json["body"]?["radii"]?.object?.compactMapValues(\.double) ?? [:])
+        let format = json["format"]?.string ?? "bvh"
+        guard ["bvh", "smpl"].contains(format) else { throw JSONError(message: "\(file): format must be \"bvh\" or \"smpl\"") }
+        let up = json["up"]?.string ?? (format == "smpl" ? "auto" : "y")
+        guard ["y", "z"].contains(up) || (format == "smpl" && up == "auto") else {
+            throw JSONError(message: "\(file): up must be \"y\" or \"z\"\(format == "smpl" ? " or \"auto\"" : "")")
+        }
+        var config = SkeletonConfig(name: json["name"]?.string ?? "custom",
+                                    unitScale: json["units"]?.double ?? (format == "smpl" ? 1 : 0.01),
+                                    yUp: up == "y", joints: joints, referenceFrame: frame?.double.map { Int($0) },
+                                    radii: json["body"]?["radii"]?.object?.compactMapValues(\.double) ?? [:])
+        config.format = format
+        config.referenceRest = frame?.string == "rest"
+        if format == "smpl" {
+            config.smpl.up = SMPLOptions.Up(rawValue: up)!
+            config.smpl.unitScale = config.unitScale
+            if let fps = json["fps"]?.double { config.smpl.defaultFPS = fps }
+            if let gender = json["gender"]?.string, gender != "file" {
+                guard ["neutral", "male", "female"].contains(gender) else {
+                    throw JSONError(message: "\(file): gender must be \"file\", \"neutral\", \"male\" or \"female\"")
+                }
+                config.smpl.gender = gender
+            }
+            for (role, value) in json["keys"]?.object ?? [:] {
+                guard let names = value.string.map({ [$0] }) ?? value.array?.compactMap(\.string), !names.isEmpty else {
+                    throw JSONError(message: "\(file): keys.\(role) must be a key or a list of keys")
+                }
+                guard config.smpl.keys[role] != nil else {
+                    throw JSONError(message: "\(file): unknown key role \(role) (\(config.smpl.keys.keys.sorted().joined(separator: ", ")))")
+                }
+                config.smpl.keys[role] = names
+            }
+            if let model = json["model"]?.string { config.model = model }
+        }
+        return config
     }
 
-    /// Reader options for one file skeleton (its joints as named in the file): the canonical joints renamed.
-    public func bvhOptions(for fileSkeleton: HumanSkeleton) throws -> BVHOptions {
-        var options = BVHOptions()
-        options.unitScale = unitScale
-        options.yUp = yUp
-        options.skeletonName = name
-        var missing: [String] = []
+    /// Canonical joint for each joint of `names` (a model's or a file's joints): name -> canonical name, checking
+    /// that every required joint is there.
+    public func renames(for names: [String]) throws -> [String: String] {
+        var renames: [String: String] = [:], missing: [String] = []
         for canonical in Set(Self.required).union(joints.keys).sorted() {
             let candidates = joints[canonical] ?? [canonical]
-            if let found = candidates.first(where: { fileSkeleton.jointIndex(named: $0) != nil }) {
-                options.jointRenames[found] = canonical
+            if let found = candidates.first(where: names.contains) {
+                renames[found] = canonical
             } else if Self.required.contains(canonical) {
                 missing.append("\(canonical) (\(candidates.joined(separator: " / ")))")
             }
@@ -68,6 +106,13 @@ public struct SkeletonConfig: Sendable {
         guard missing.isEmpty else {
             throw JSONError(message: "skeleton \(name): no joint for \(missing.joined(separator: ", "))")
         }
+        return renames
+    }
+
+    /// Reader options for one file skeleton (its joints as named in the file): the canonical joints renamed.
+    public func bvhOptions(for fileSkeleton: HumanSkeleton) throws -> BVHOptions {
+        var options = rawOptions
+        options.jointRenames = try renames(for: fileSkeleton.jointNames)
         return options
     }
 

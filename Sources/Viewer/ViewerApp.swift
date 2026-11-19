@@ -36,7 +36,8 @@ public struct ViewerConfiguration: Sendable {
 /// skeleton, its reference pose and body built from the first clip of it that is opened.
 final class SkeletonContext: @unchecked Sendable {
     let key: String
-    let options: BVHOptions
+    /// Reads a clip of this skeleton.
+    let read: @Sendable (String) throws -> HumanMotion
     /// nil: SOMA without its rig file (the body shows, retargeting is unavailable).
     let skeleton: HumanSkeleton?
     let surface: BodySurface
@@ -46,9 +47,9 @@ final class SkeletonContext: @unchecked Sendable {
     var retargeters: [String: HumanRetargeter] = [:]  // per robot
     var offline: [String: OfflineRetargeter] = [:]
 
-    init(key: String, options: BVHOptions, skeleton: HumanSkeleton?, surface: BodySurface) throws {
+    init(key: String, skeleton: HumanSkeleton?, surface: BodySurface, read: @escaping @Sendable (String) throws -> HumanMotion) throws {
         self.key = key
-        self.options = options
+        self.read = read
         self.skeleton = skeleton
         self.surface = surface
         groups = try ContactGroups.of(surface)
@@ -62,6 +63,8 @@ public final class ViewerApp: Sendable {
     let soma: SkeletonContext?
     /// Custom skeletons seen so far, by `SkeletonConfig.signature`.
     let contexts: Mutex<[String: SkeletonContext]>
+    /// SMPL-family clips (skeleton config format "smpl"): the body model.
+    let smpl: SMPLSource?
     /// GPU skinning and retargeting; slang-rhi devices are not thread-safe, so requests take turns.
     let gpu: Mutex<GPUState?>
 
@@ -78,11 +81,13 @@ public final class ViewerApp: Sendable {
             ($0.0, try RobotUSDLoader.load(directory: g1 + "/" + $0.1, name: $0.0))
         }
         contexts = Mutex([:])
+        smpl = config.skeleton.flatMap { $0.format == "smpl" ? SMPLSource(config: $0, repository: config.repositoryRoot) : nil }
         var soma: SkeletonContext?
         if config.skeleton == nil, let surface = try? BodySurface.load(file: config.repositoryRoot + "/assets/body_models/soma/surface_lo.npz") {
             let rig = config.repositoryRoot + "/assets/body_models/soma/seed_soma_shapes/soma_base_rig/soma_base_skel_minimal.bvh"
-            soma = try? SkeletonContext(key: "soma", options: BVHOptions(), skeleton: try? BVH.load(file: rig).skeleton,
-                                        surface: surface)
+            soma = try? SkeletonContext(key: "soma", skeleton: try? BVH.load(file: rig).skeleton, surface: surface) {
+                try BVH.load(file: $0)
+            }
         }
         self.soma = soma
         var state: GPUState?
@@ -126,14 +131,27 @@ public final class ViewerApp: Sendable {
             guard let soma else { throw ComputeError(message: "no body surface (run ./setup.sh)") }
             return soma
         }
-        let raw = try BVH.loadSkeleton(file: path, options: config.rawOptions)
-        let key = SkeletonConfig.signature(raw)
-        if let known = contexts.withLock({ $0[key] }) { return known }
-        let options = try config.bvhOptions(for: raw)
-        let motion = try BVH.load(file: path, options: options)
-        let body = try CustomBody.make(motion, config: config)
-        let made = try SkeletonContext(key: key, options: options, skeleton: motion.skeleton, surface: body.surface)
-        print("viewer: skeleton \(key) (\(motion.skeleton.jointCount) joints) from \(path), reference frame \(body.frame)")
+        let made: SkeletonContext
+        if let smpl {
+            // One body per gender and shape.
+            let (clip, motion) = try smpl.load(file: path)
+            let key = SkeletonConfig.signature(motion.skeleton)
+            if let known = contexts.withLock({ $0[key] }) { return known }
+            let body = try smpl.surface(for: clip, motion: motion)
+            made = try SkeletonContext(key: key, skeleton: motion.skeleton, surface: body.surface) { try smpl.load(file: $0).motion }
+            print("viewer: SMPL body \(key) (\(clip.gender), \(clip.layout)) from \(path), reference "
+                  + (body.frame.map { "frame \($0)" } ?? "rest pose"))
+        } else {
+            let raw = try BVH.loadSkeleton(file: path, options: config.rawOptions)
+            let key = SkeletonConfig.signature(raw)
+            if let known = contexts.withLock({ $0[key] }) { return known }
+            let options = try config.bvhOptions(for: raw)
+            let motion = try BVH.load(file: path, options: options)
+            let body = try CustomBody.make(motion, config: config)
+            made = try SkeletonContext(key: key, skeleton: motion.skeleton, surface: body.surface) { try BVH.load(file: $0, options: options) }
+            print("viewer: skeleton \(key) (\(motion.skeleton.jointCount) joints) from \(path), reference frame \(body.frame)")
+        }
+        let key = made.key
         return contexts.withLock { known in
             if let existing = known[key] { return existing }   // built meanwhile by another request
             known[key] = made
@@ -144,7 +162,7 @@ public final class ViewerApp: Sendable {
     /// A clip read with its skeleton's options.
     func load(_ path: String) throws -> (SkeletonContext, HumanMotion) {
         let context = try context(path)
-        return (context, try BVH.load(file: path, options: context.options))
+        return (context, try context.read(path))
     }
 
     public func run() throws -> Never {
@@ -176,12 +194,12 @@ public final class ViewerApp: Sendable {
         case "/api/dirs":
             // "." when the root itself holds clips.
             let entries = listDirectory(config.motionRoot)
-            let dirs = (entries.contains { !$0.isDirectory && $0.name.hasSuffix(".bvh") } ? ["."] : [])
+            let dirs = (entries.contains { !$0.isDirectory && isClip($0.name) } ? ["."] : [])
                 + entries.filter(\.isDirectory).map(\.name)
             return .json(JSON.array(dirs.map { .string($0) }).text)
         case "/api/files":
             guard let dir = request.query["dir"], let path = safePath(dir) else { return .text("bad dir", status: 400) }
-            let files = listDirectory(path).filter { !$0.isDirectory && $0.name.hasSuffix(".bvh") }.map { JSON.string($0.name) }
+            let files = listDirectory(path).filter { !$0.isDirectory && isClip($0.name) }.map { JSON.string($0.name) }
             return .json(JSON.array(files).text)
         case "/api/human":
             guard let file = request.query["file"], let path = safePath(file) else { return .text("bad file", status: 400) }
@@ -209,6 +227,9 @@ public final class ViewerApp: Sendable {
     // MARK: - Helpers
 
     func robot(_ name: String?) -> RobotModel? { robots.first { $0.name == name }?.model }
+
+    /// A clip file of the configured kind (.bvh; .npz / .pkl for SMPL parameter files).
+    func isClip(_ name: String) -> Bool { (config.skeleton?.extensions ?? [".bvh"]).contains(where: name.hasSuffix) }
 
     /// Resolves a path relative to the motion root, refusing anything that could escape it.
     func safePath(_ relative: String) -> String? {
@@ -277,7 +298,7 @@ public final class ViewerApp: Sendable {
         let skeleton: SkeletonContext?, motion: HumanMotion
         do {
             skeleton = config.skeleton == nil && soma == nil ? nil : try context(path)
-            motion = try BVH.load(file: path, options: skeleton?.options ?? BVHOptions())
+            motion = try skeleton?.read(path) ?? BVH.load(file: path)
         } catch { return .text("\(error)", status: 400) }
         var pos: [Float] = [], rot: [Float] = []
         pos.reserveCapacity(motion.frameCount * motion.skeleton.jointCount * 3)

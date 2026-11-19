@@ -12,6 +12,34 @@ public struct NPYArray: Sendable {
     public enum DType: Sendable, Equatable {
         case float32, float64, int32, int64, uint8, bool
         case unicode(Int)  // <U<n>: n UTF-32 code units per element
+        case ascii(Int)    // |S<n>: n bytes per element
+
+        /// From a numpy type string ("<f8", "|b1", "<U6", ...); nil for types we do not read.
+        public init?<S: StringProtocol>(descr: S) {
+            switch descr {
+            case "<f4": self = .float32
+            case "<f8": self = .float64
+            case "<i4": self = .int32
+            case "<i8": self = .int64
+            case "|u1": self = .uint8
+            case "|b1": self = .bool
+            default:
+                if descr.hasPrefix("<U"), let n = Int(descr.dropFirst(2)) { self = .unicode(n) }
+                else if descr.hasPrefix("|S"), let n = Int(descr.dropFirst(2)) { self = .ascii(n) }
+                else { return nil }
+            }
+        }
+
+        /// Bytes per element.
+        public var size: Int {
+            switch self {
+            case .float32, .int32: 4
+            case .float64, .int64: 8
+            case .uint8, .bool: 1
+            case .unicode(let n): 4 * n
+            case .ascii(let n): n
+            }
+        }
     }
 
     public var dtype: DType
@@ -32,7 +60,7 @@ public struct NPYArray: Sendable {
         case .int32: load(Int32.self).map(Double.init)
         case .int64: load(Int64.self).map(Double.init)
         case .uint8, .bool: bytes.map(Double.init)
-        case .unicode: throw NPYError(message: "string array is not numeric")
+        case .unicode, .ascii: throw NPYError(message: "string array is not numeric")
         }
     }
 
@@ -46,6 +74,9 @@ public struct NPYArray: Sendable {
     }
 
     public func strings() throws -> [String] {
+        if case .ascii(let n) = dtype {
+            return (0..<count).map { i in String(decoding: bytes[(i * n)..<((i + 1) * n)].prefix { $0 != 0 }, as: UTF8.self) }
+        }
         guard case .unicode(let n) = dtype else { throw NPYError(message: "array is not a string array") }
         let scalars = load(UInt32.self, count: count * n)
         return (0..<count).map { i in
@@ -83,18 +114,7 @@ public struct NPYArray: Sendable {
         let shapeText = shapeField.dropFirst().prefix { $0 != ")" }
         let shape = shapeText.split(separator: ",").compactMap { Int($0.filter { $0 != " " }) }
 
-        let dtype: DType
-        switch descr {
-        case "<f4": dtype = .float32
-        case "<f8": dtype = .float64
-        case "<i4": dtype = .int32
-        case "<i8": dtype = .int64
-        case "|u1": dtype = .uint8
-        case "|b1": dtype = .bool
-        default:
-            if descr.hasPrefix("<U"), let n = Int(descr.dropFirst(2)) { dtype = .unicode(n) }
-            else { throw NPYError(message: "unsupported dtype \(descr)") }
-        }
+        guard let dtype = DType(descr: descr) else { throw NPYError(message: "unsupported dtype \(descr)") }
         let start = headerStart + headerLength
         return NPYArray(dtype: dtype, shape: shape, bytes: Array(b[start...]))
     }

@@ -794,4 +794,67 @@ test("[custom] SOMA walk through the generic path tracks and finds contacts like
     expect(root.reduce(0, +) / Double(root.count) < 0.02, "root within 2 cm of the baked path")
 }
 
+// SMPL-family clips (DESIGN §17): a camera-frame SMPL+H fit (Y-up) and an OMOMO SMPL-X capture (Z-up, root and body
+// stored apart). Skipped without the exported SMPL-X model or the clips.
+let home = getenv("HOME").map { String(cString: $0) } ?? ""
+let smplClips = [(getenv("SMPL_CLIP_SMPLH").map { String(cString: $0) } ?? home + "/Downloads/43625154008-1-192_flowhmr.npz", "SMPL+H, Y-up"),
+                 (getenv("SMPL_CLIP_OMOMO").map { String(cString: $0) } ?? home + "/Downloads/OMOMO_smplx/sub1_clothesstand_000.pkl", "OMOMO, Z-up")]
+test("[smpl] SMPL+H and OMOMO SMPL-X clips: upright, grounded, tracked") {
+    guard access(repositoryRoot + "/assets/body_models/smplx/smplx_lbs_neutral.npz", F_OK) == 0 else {
+        print("  skipped: no exported SMPL-X model (python tools/export_smplx_model.py)")
+        return
+    }
+    let config = try SkeletonConfig.load(file: repositoryRoot + "/Configs/skeletons/smplx.json")
+    let source = SMPLSource(config: config, repository: repositoryRoot)
+    let (_, robot) = robots[0]
+    for (file, label) in smplClips where access(file, F_OK) == 0 {
+        let (clip, motion) = try source.load(file: file)
+        let body = try source.surface(for: clip, motion: motion).surface
+        let s = motion.skeleton
+        let reference = body.referencePose!
+        func at(_ name: String) -> Vec3 { reference[s.jointIndex(named: name)!].translation }
+        print("  \(label): \(clip.layout), \(clip.gender), \(motion.frameCount) frames; reference height \(format(at("Head").z)) m")
+        // Reference: standing on z = 0, facing +X (left hip at +Y), arms out sideways.
+        expect(at("LeftLeg").y > at("RightLeg").y, "\(label): left at +Y")
+        expect(at("LeftToeBase").x > at("LeftFoot").x, "\(label): toes point +X")
+        expect(abs(at("LeftHand").z - at("LeftArm").z) < 0.03 && at("LeftHand").y > at("LeftArm").y + 0.4, "\(label): arms out")
+        let retargeter = try HumanRetargeter(device: gpu, robot: robot, mapping: try mapping("g1_29dof"), surface: body, skeleton: s)
+        let r = try retargeter.retarget([motion])[0]
+        // The person stands upright in our frame (head above the pelvis) whatever the file's up axis.
+        var upright = 0
+        for f in stride(from: 0, to: motion.frameCount, by: 5) {
+            let w = motion.globalTransforms(frame: f)
+            if w[s.jointIndex(named: "Head")!].translation.z > w[s.jointIndex(named: "Hips")!].translation.z + 0.3 { upright += 1 }
+        }
+        expect(upright * 5 > motion.frameCount * 9 / 10, "\(label): upright in Z-up")
+        let feet = ["left_heel", "left_toe", "right_heel", "right_toe"].map { r.contacts.groupNames.firstIndex(of: $0)! }
+        let planted = (0..<r.contacts.frameCount).filter { f in feet.contains { r.contacts.contact(f, $0) } }.count
+        print("    foot contact in \(format(100 * Double(planted) / Double(r.contacts.frameCount))) % of frames")
+        expect(planted > r.contacts.frameCount * 8 / 10, "\(label): feet on the ground")
+        // Per target tracking, to spot a bad reference offset.
+        let setup = retargeter.setup
+        var pos = [[Double]](repeating: [], count: setup.mapping.targets.count), rot = pos
+        for f in 0..<r.trajectory.frameCount {
+            let world = robot.forwardKinematics(root: r.trajectory.root[f], q: r.trajectory.q[f])
+            for (t, target) in setup.mapping.targets.enumerated() {
+                let link = world[setup.robotLink[t]], goal = r.prepared.goals[f][t]
+                pos[t].append(length(link.translation - goal.translation))
+                rot[t].append(Quat.angle(link.rotation, goal.rotation) * 180 / .pi)
+            }
+        }
+        for (t, target) in setup.mapping.targets.enumerated() {
+            print("    \(target.human.padding(13)) pos mean \(format(100 * pos[t].reduce(0, +) / Double(pos[t].count))) cm, "
+                  + "rot median \(format(percentile(rot[t], 0.5)))° p95 \(format(percentile(rot[t], 0.95)))°")
+        }
+        let all = trackingErrors(setup, r.trajectory, r.prepared.goals).pos
+        let mean = all.reduce(0, +) / Double(all.count)
+        print("    tracking mean \(format(100 * mean)) cm")
+        // A rest-pose reference (collars raised, as in the T-pose) put the shoulder and elbow goals 5 cm below the
+        // robot's reach: 2.8 / 3.0 cm mean; from a standing frame 2.1 / 1.5 cm.
+        expect(mean < 0.025, "\(label): tracks")
+    }
+}
+
+
+
 finishTests()

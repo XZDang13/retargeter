@@ -16,7 +16,11 @@ let bvhRoot: String = {
 nonisolated(unsafe) var testFailures = 0
 nonisolated(unsafe) var currentTest = ""
 
+/// $TEST_FILTER: run only the tests whose name contains it.
+let testFilter = getenv("TEST_FILTER").map { String(cString: $0) }
+
 func test(_ name: String, _ body: () throws -> Void) {
+    if let testFilter, !name.contains(testFilter) { return }
     currentTest = name
     let before = testFailures
     do {

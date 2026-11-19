@@ -71,6 +71,19 @@ The reference pose comes from a standing frame of the clips and the contact body
 viewer takes the same option (`retarget view --motions my_clips --skeleton Configs/skeletons/lafan1.json`; the generated
 body shows as points); `validate` and `teleop` still take SOMA clips only.
 
+**SMPL / SMPL+H / SMPL-X.** Parameter files (`.npz` like AMASS, `.pkl` like OMOMO, camera-frame fits) retarget with
+`Configs/skeletons/smplx.json`, one config for all those layouts (DESIGN §17). It needs the SMPL-X model: put
+`SMPLX_{NEUTRAL,MALE,FEMALE}.npz` (licensed; [smpl-x.is.tue.mpg.de](https://smpl-x.is.tue.mpg.de)) in
+`assets/body_models/smplx/` and run `./setup.sh` (or `build/tools/venv/bin/python tools/export_smplx_model.py`):
+
+```bash
+build/release/retarget offline ~/Downloads/OMOMO_smplx --skeleton Configs/skeletons/smplx.json --out out_omomo
+```
+
+Each gender and shape gets its own body (the SMPL-X mesh) and reference pose; the up axis (Y for camera-frame fits,
+Z for AMASS / OMOMO) is detected per clip unless the config sets `up`. Pickles are read without running any code
+from them. The viewer takes the same option.
+
 Validate trajectories from any tool (our `.npz`, NVIDIA soma-retargeter `.csv`) against their source clips:
 
 ```bash
