@@ -69,6 +69,8 @@ public final class ViewerApp: Sendable {
     let smpl: SMPLSource?
     /// Serialises uploads (choosing a free name, writing).
     let uploads = Mutex(())
+    /// The last retargeted clip (see `solve`).
+    let lastSolve = Mutex<Solved?>(nil)
     /// GPU skinning and retargeting; slang-rhi devices are not thread-safe, so requests take turns.
     let gpu: Mutex<GPUState?>
 
@@ -205,6 +207,11 @@ public final class ViewerApp: Sendable {
                 return .text("bad request", status: 400)
             }
             return retarget(path, robot: robot, offline: request.query["mode"] == "offline")
+        case "/api/download":
+            guard let robot = robot(request.query["name"]), let file = request.query["file"], let path = safePath(file) else {
+                return .text("bad request", status: 400)
+            }
+            return download(path, file: file, robot: robot, offline: request.query["mode"] != "realtime")
         case "/api/dirs":
             // "." when the root itself holds clips.
             let entries = listDirectory(config.motionRoot)
@@ -388,31 +395,49 @@ public final class ViewerApp: Sendable {
         return payload.response
     }
 
-    /// Realtime (lag = 0) retargeting of a clip onto `robot`; link poses at the source frame rate.
-    func retarget(_ path: String, robot: RobotModel, offline: Bool) -> HTTPResponse {
-        let context: SkeletonContext, motion: HumanMotion
-        do { (context, motion) = try load(path) } catch { return .text("\(error)", status: 400) }
-        let trajectory: RobotTrajectory
-        var report = ValidationReport()
-        do {
-            trajectory = try gpu.withLock { state -> RobotTrajectory in
-                guard let state else { throw ComputeError(message: "retargeting unavailable (needs a GPU)") }
-                try Self.prepareGPU(context, robot: robot.name, model: robot, device: state.device,
-                                    repository: config.repositoryRoot)
-                guard let retargeter = context.retargeters[robot.name] else { throw ComputeError(message: "no retargeter") }
-                let result: RetargetResult
-                if offline, let solver = context.offline[robot.name] {
-                    result = try solver.solve(try solver.prepare([motion]))[0]
-                } else {
-                    result = try retargeter.retarget([motion])[0]
-                }
-                if let validator = state.validators[robot.name] {
-                    report = validator.checkHuman(result.prepared, setup: retargeter.setup)
-                    validator.checkRobot(result, setup: retargeter.setup, fps: 50, into: &report)
-                }
-                return result.trajectory
+    /// One retargeted clip: the solver result and its validation.
+    struct Solved: Sendable {
+        let key: String
+        let result: RetargetResult
+        let report: ValidationReport
+    }
+
+    /// Retargets a clip onto `robot` (realtime: lag 0; offline: whole-trajectory) and validates it. The last solve is
+    /// kept, so a download right after viewing a clip returns exactly the motion shown without solving again.
+    func solve(_ path: String, robot: RobotModel, offline: Bool) throws -> Solved {
+        let key = "\(robot.name)|\(offline ? "offline" : "realtime")|\(path)"
+        if let last = lastSolve.withLock({ $0 }), last.key == key { return last }
+        let (context, motion) = try load(path)
+        let solved = try gpu.withLock { state -> Solved in
+            guard let state else { throw ComputeError(message: "retargeting unavailable (needs a GPU)") }
+            try Self.prepareGPU(context, robot: robot.name, model: robot, device: state.device,
+                                repository: config.repositoryRoot)
+            guard let retargeter = context.retargeters[robot.name] else { throw ComputeError(message: "no retargeter") }
+            let result: RetargetResult
+            if offline, let solver = context.offline[robot.name] {
+                result = try solver.solve(try solver.prepare([motion]))[0]
+            } else {
+                result = try retargeter.retarget([motion])[0]
             }
-        } catch { return .text("\(error)", status: 500) }
+            var report = ValidationReport()
+            if let validator = state.validators[robot.name] {
+                report = validator.checkHuman(result.prepared, setup: retargeter.setup)
+                validator.checkRobot(result, setup: retargeter.setup, fps: Self.exportFPS, into: &report)
+            }
+            return Solved(key: key, result: result, report: report)
+        }
+        lastSolve.withLock { $0 = solved }
+        return solved
+    }
+
+    /// Frame rate of downloaded motions (the batch commands' default, the policy rate).
+    static let exportFPS = 50.0
+
+    /// Retargeting of a clip onto `robot`; link poses at the source frame rate.
+    func retarget(_ path: String, robot: RobotModel, offline: Bool) -> HTTPResponse {
+        let solved: Solved
+        do { solved = try solve(path, robot: robot, offline: offline) } catch { return .text("\(error)", status: 500) }
+        let trajectory = solved.result.trajectory, report = solved.report
         var pos: [Float] = [], rot: [Float] = [], qs: [Float] = []
         for f in 0..<trajectory.frameCount {
             qs += trajectory.q[f].map(Float.init)
@@ -430,6 +455,46 @@ public final class ViewerApp: Sendable {
         payload.add("q", floats: qs)
         payload.add("cost", floats: trajectory.cost.map(Float.init))
         return payload.response
+    }
+
+    /// GET /api/download?name=ROBOT&file=CLIP&mode=offline|realtime: the retargeted clip as the .npz the batch
+    /// commands write (50 fps, validation status and metrics included), as a file download.
+    func download(_ path: String, file: String, robot: RobotModel, offline: Bool) -> HTTPResponse {
+        let solved: Solved
+        do { solved = try solve(path, robot: robot, offline: offline) } catch { return .text("\(error)", status: 500) }
+        let report = solved.report
+        var options = ExportOptions()
+        options.fps = Self.exportFPS
+        options.source = path
+        options.configHash = Self.configHash(repository: config.repositoryRoot, robot: robot.name)
+        options.status = report.status.rawValue
+        options.rejectReasons = report.reasons
+        options.warnings = report.warnings
+        options.metricsJSON = report.json.text
+        options.mode = offline ? "offline" : "realtime"
+        if let d = report.dynamics {
+            options.tau = d.tau
+            options.contactForce = d.contactForce
+            options.dynamicsResidual = d.residual
+            options.zmp = d.zmp
+        }
+        let bytes = RobotMotionExport.archive(solved.result, robot: robot, options: options).bytes()
+        // <clip>_<robot>[_realtime].npz, in a safe character set (it goes into a header).
+        var stem = String(file.split(separator: "/").last ?? "motion")
+        if let dot = stem.lastIndex(of: ".") { stem = String(stem[..<dot]) }
+        let name = String((stem + "_" + robot.name + (offline ? "" : "_realtime")).map {
+            $0.isASCII && ($0.isLetter || $0.isNumber || "-_.".contains($0)) ? $0 : "_"
+        }) + ".npz"
+        return HTTPResponse(contentType: "application/octet-stream", body: bytes,
+                            headers: [("Content-Disposition", "attachment; filename=\"\(name)\"")])
+    }
+
+    /// The batch commands' config hash: FNV-1a of the mapping file + the export format version.
+    static func configHash(repository: String, robot: String) -> String {
+        let bytes = readFile(repository + "/Configs/mappings/soma77_\(robot).json") ?? []
+        var h: UInt64 = 1_469_598_103_934_665_603
+        for b in bytes { h = (h ^ UInt64(b)) &* 1_099_511_628_211 }
+        return String(h, radix: 16) + "-" + RobotMotionExport.version
     }
 
     /// Ground + contact analysis of a clip (offline or causal) for display.

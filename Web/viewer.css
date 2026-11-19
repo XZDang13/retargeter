@@ -87,7 +87,7 @@ button {
 #tracks[hidden] { display: none; }
 #trackCanvas { display: block; width: 100%; cursor: pointer; }
 
-#uploadButton {
+#uploadButton, #downloadButton {
   width: auto;
   height: auto;
   background: var(--bg);
@@ -96,6 +96,7 @@ button {
   border-radius: 6px;
   padding: 3px 10px;
 }
+#downloadButton:disabled { color: var(--muted); cursor: default; }
 
 /* Drag-and-drop overlay over the whole window while files are dragged in. */
 #drop {

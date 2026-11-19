@@ -119,4 +119,6 @@ The viewer opens `.bvh` clips (as SOMA, or with `--skeleton` a custom BVH config
 clips (with `Configs/skeletons/smplx.json` unless `--skeleton` names another SMPL config) side by side. To look at a
 new clip, drop the files anywhere on the page (or use **Upload…**): they are saved in `<motions>/uploads/`, checked
 that they read (a file that does not is refused and not kept), and the last one is opened. Uploads are only
-accepted from the viewer's own page on 127.0.0.1.
+accepted from the viewer's own page on 127.0.0.1. **Download .npz** saves the retargeted robot motion on screen
+(offline or realtime) in the format `retarget offline` / `realtime` write, at 50 fps, with its validation status
+and metrics; it reuses the solve shown, so nothing is retargeted again.

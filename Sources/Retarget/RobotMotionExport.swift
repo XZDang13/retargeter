@@ -75,6 +75,11 @@ public enum RobotMotionExport {
 
     /// Writes one retargeted clip as .npz. Contacts (human-side, per group) are resampled by nearest frame.
     public static func write(_ result: RetargetResult, robot: RobotModel, to file: String, options: ExportOptions) throws {
+        try archive(result, robot: robot, options: options).write(file: file)
+    }
+
+    /// The .npz archive `write` saves (the viewer serves its bytes as a download).
+    public static func archive(_ result: RetargetResult, robot: RobotModel, options: ExportOptions) -> NPZWriter {
         let traj = result.trajectory.resampled(to: options.fps)
         let T = traj.frameCount, n = robot.dofCount, dt = 1 / traj.fps
         var npz = NPZWriter()
@@ -148,6 +153,6 @@ public enum RobotMotionExport {
             npz.add("zmp", float32: zmp.flatMap { p in p.map { [Float($0.x), Float($0.y), Float($0.z)] } ?? [.nan, .nan, .nan] },
                     shape: [T, 3])
         }
-        try npz.write(file: file)
+        return npz
     }
 }

@@ -62,6 +62,16 @@ public struct NPZWriter {
 
     /// Writes the archive atomically (temporary file + rename).
     public func write(file: String) throws {
+        let out = bytes()
+        let temporary = file + ".tmp"
+        guard let handle = fopen(temporary, "wb") else { throw NPYError(message: "cannot write \(temporary)") }
+        let written = out.withUnsafeBytes { fwrite($0.baseAddress, 1, $0.count, handle) }
+        fclose(handle)
+        guard written == out.count, rename(temporary, file) == 0 else { throw NPYError(message: "failed writing \(file)") }
+    }
+
+    /// The archive's bytes (an uncompressed zip of .npy members).
+    public func bytes() -> [UInt8] {
         var out: [UInt8] = []
         var central: [UInt8] = []
         func le16(_ v: Int) -> [UInt8] { [UInt8(v & 0xFF), UInt8((v >> 8) & 0xFF)] }
@@ -82,12 +92,7 @@ public struct NPZWriter {
         out += central
         out += le32(0x0605_4b50) + le16(0) + le16(0) + le16(members.count) + le16(members.count)
         out += le32(central.count) + le32(directoryOffset) + le16(0)
-
-        let temporary = file + ".tmp"
-        guard let handle = fopen(temporary, "wb") else { throw NPYError(message: "cannot write \(temporary)") }
-        let written = out.withUnsafeBytes { fwrite($0.baseAddress, 1, $0.count, handle) }
-        fclose(handle)
-        guard written == out.count, rename(temporary, file) == 0 else { throw NPYError(message: "failed writing \(file)") }
+        return out
     }
 }
 

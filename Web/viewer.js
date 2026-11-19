@@ -12,7 +12,7 @@ const ui = {
   mode: $('mode'), layout: $('layout'), robot: $('robot'), robotMotion: $('robotMotion'),
   dir: $('dir'), file: $('file'), showSurface: $('showSurface'), showSkeleton: $('showSkeleton'),
   contactMode: $('contactMode'), tracks: $('tracks'), trackCanvas: $('trackCanvas'),
-  play: $('play'), scrub: $('scrub'), time: $('time'), speed: $('speed'), loop: $('loop'), status: $('status'),
+  play: $('play'), scrub: $('scrub'), time: $('time'), speed: $('speed'), loop: $('loop'), status: $('status'), downloadButton: $('downloadButton'),
   uploadButton: $('uploadButton'), uploadInput: $('uploadInput'), drop: $('drop'),
 };
 const SIDE_OFFSET = new THREE.Vector3(0, 1.2, 0); // human shown to the robot's left in side-by-side layout
@@ -113,6 +113,7 @@ async function loadRobot(name) {
 async function loadRobotMotion() {
   const name = encodeURIComponent(ui.robot.value), kind = ui.robotMotion.value;
   robot.verdict = '';
+  ui.downloadButton.disabled = true;   // enabled once a retargeted motion is shown
   if (kind === 'retarget' || kind === 'offline') {
     if (!human.file) return; // loaded again once a human clip is selected
     const file = human.file;
@@ -125,6 +126,7 @@ async function loadRobotMotion() {
     robot.verdict = v ? (v.status === 'accepted' ? 'robot: accepted' : `robot: REJECTED (${v.reasons.join('; ')})`) : '';
     // The status as it is now (the contacts may have finished meanwhile), without the retargeting note.
     ui.status.textContent = `${ui.status.textContent.replace(/ · (robot: |retargeting onto ).*$/, '')} · ${robot.verdict}`;
+    ui.downloadButton.disabled = false;
   } else {
     const motion = await fetchPacked(`/api/robot_demo?name=${name}&demo=${kind}`);
     if (ui.robotMotion.value !== kind || ui.robot.value !== decodeURIComponent(name)) return; // superseded
@@ -573,6 +575,17 @@ window.addEventListener('drop', (e) => {
   dragDepth = 0;
   ui.drop.hidden = true;
   uploadFiles([...e.dataTransfer.files]);
+});
+// The robot motion on screen as .npz; the server reuses its last solve, so this does not retarget again.
+ui.downloadButton.addEventListener('click', () => {
+  if (!human.file) return;
+  const mode = ui.robotMotion.value === 'offline' ? 'offline' : 'realtime';
+  const link = document.createElement('a');
+  link.href = `/api/download?name=${encodeURIComponent(ui.robot.value)}&file=${encodeURIComponent(human.file)}&mode=${mode}`;
+  link.download = '';   // the server names the file (Content-Disposition)
+  document.body.append(link);
+  link.click();
+  link.remove();
 });
 ui.uploadButton.addEventListener('click', () => ui.uploadInput.click());
 ui.uploadInput.addEventListener('change', () => {

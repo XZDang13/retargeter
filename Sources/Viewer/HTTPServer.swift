@@ -23,11 +23,14 @@ public struct HTTPResponse: Sendable {
     public var status: Int
     public var contentType: String
     public var body: [UInt8]
+    /// Extra header lines (name, value), e.g. Content-Disposition.
+    public var headers: [(String, String)] = []
 
-    public init(status: Int = 200, contentType: String, body: [UInt8]) {
+    public init(status: Int = 200, contentType: String, body: [UInt8], headers: [(String, String)] = []) {
         self.status = status
         self.contentType = contentType
         self.body = body
+        self.headers = headers
     }
 
     public static func text(_ s: String, status: Int = 200) -> HTTPResponse {
@@ -148,6 +151,7 @@ public final class HTTPServer: @unchecked Sendable {
         let reason = [200: "OK", 400: "Bad Request", 403: "Forbidden", 404: "Not Found", 405: "Method Not Allowed",
                       411: "Length Required", 413: "Payload Too Large", 500: "Internal Server Error"][response.status] ?? "OK"
         let head = "HTTP/1.1 \(response.status) \(reason)\r\nContent-Type: \(response.contentType)\r\n"
+            + response.headers.map { "\($0.0): \($0.1)\r\n" }.joined()
             + "Content-Length: \(response.body.count)\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n"
         sendAll(fd, Array(head.utf8))
         sendAll(fd, response.body)
