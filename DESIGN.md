@@ -197,9 +197,11 @@ realtime commits contact changes 2–3 frames late for debouncing (≈ 20 ms at 
   turning jogs). Ballistic frames (g + a_z < 0.25 g) are `flight`.
 - Support hull = contact patches (every vertex of a contacting group within 3 cm of its lowest point),
   not just the lowest-k points — single-support walking needs the whole sole.
-- ZMP > 6 cm outside the hull for ≥ 0.3 s → `unsupported`. The hull takes the contacts and any part within its
-  enter height of the ground however fast (a sliding foot carries weight). Each unsupported frame is explained
-  greedily: add the elevated (feet > 4 cm, others > 6 cm), static (< 0.1 m/s horizontally and vertically) part
+- ZMP > 6 cm outside the hull for ≥ 0.3 s → `unsupported`. The hull takes the contacts, any part within its
+  enter height of the ground however fast (a sliding foot carries weight), and any static part other than a foot
+  within 12 cm of the ground (resting on the floor: generated floor sitting sinks the tucked toes ~4 cm, which set
+  the ground, while the pelvis and thighs rest 6-10 cm above them). Each unsupported frame is explained
+  greedily: add the elevated (feet > 4 cm, others > 12 cm), static (< 0.1 m/s horizontally and vertically) part
   whose patch brings the ZMP closest to the hull, until it is inside. Only parts free below count: a part whose
   contact patch mostly has another body part within 4 cm horizontally and > 5 cm lower (a torso above the
   legs, a hanging arm, the head) cannot rest on anything. Then every static elevated part whose patch comes within
@@ -418,7 +420,7 @@ Human-side pre-filter:
 |-----------------------------------------------------------|--------------------------|---------------|
 | `env_contact` / `env_support` (§5a)                       | any                      | ours          |
 | unexplained unsupported time (§5a)                        | warn > 0 (no reject)     | ours          |
-| human penetration below the local floor (§5a)             | feet 4 cm, body 8 cm, ≥ 25 ms | ours     |
+| human penetration below the local floor (§5a)             | feet 4 cm, body 8 cm, ≥ 25 ms (warn only) | ours |
 | root jerk                                                 | > 50 m/s³                | PHUMA         |
 | CoM–CoP / support distance                                | > 0.1 m for > 100 frames, or at first/last frame | PBHC |
 | clip length                                               | < 10 frames              | UniTracker    |
@@ -437,7 +439,7 @@ truth):
 | contact   | foot skate excess over the human's (p95)                    | 0.08 / 0.10 m/s     |
 | contact   | foot float p95; ground penetration                          | 3 / 4 cm; 2 / 2.5 cm |
 | collision | self-collision penetration (capsules)                       | 2 / 2.5 cm          |
-| dynamics  | unexplained wrench, held 0.1 s (supported; in flight)       | 0.25 / 0.30; 0.40 / 0.50 |
+| dynamics  | unexplained wrench, held 0.1 s (supported; in flight)       | 0.25 / 0.30; 0.40 / 0.80 |
 | dynamics  | ZMP outside the support, held 0.3 s                         | 6 / 8 cm            |
 | dynamics  | weight on the hands (fingertip patch), held 0.1 s           | 0.5 / ≥ 0.7 mg      |
 | dynamics  | wrist torque over effort limit, held 50 ms                  | recorded, not judged |
@@ -1038,6 +1040,35 @@ retargeter/
   reference a straightened standing frame (the model's rest pose has raised collars: arm goals 5 cm too low).
   Pickles go through a restricted reader that only builds arrays. No separate SMPL mapping: the SOMA mappings work
   through the canonical joint names.
+- Thresholds against a tracking policy (2026-11-20; user: tune the thresholds on the generated-motion results).
+  1,212 generated clips (MotionGraph `gen/`: a hand-written set and two automatic rounds), each benchmarked with
+  full-library tracking policies (3 seeds); "good" = return >= 0.9 with no fall, "failed" = falls in half the runs
+  or return < 0.7. The rules separate well overall (accepted: 497 good / 72 partial / 5 failed; rejected: 214 /
+  206 / 218), and most rejected clips that track are rejected by a rule the policy cannot judge or by a contact
+  false positive:
+  - Human `penetration_frames` demoted to a warning: the 64 clips it alone rejected (lying, sitting, kneeling on the
+    floor, mostly every frame) tracked (51 good, 12 partial, 1 failed); `ground_penetration_max` judges the robot.
+  - `dyn_flight_residual_max` rejects from 0.80 (was 0.50): clips it alone flagged at 0.5-0.9 tracked (return
+    0.87-0.93, no falls), from 0.9 they fail (0.57-0.64: runs at 2.4-2.8 m/s, jumps).
+  - Together: 574 -> 650 accepted (good 551, partial 93, failed 6; mean return 0.941 -> 0.938). Re-scored on the
+    stored BONES-SEED metrics (older validator run): about +1,100 accepted on 29 DoF, +1,000 on 23 DoF.
+  - Kept: `dyn_residual_max` 0.30 (return falls steadily past it: 0.90 at 0.25-0.30, 0.86 at 0.30-0.35), ZMP,
+    skate, self-collision (0.025-0.04 gains 13 clips, one failing; the policy simulates self-collision), and
+    `tracking_pos_mean` 0.10 (user's call): it rejects 36 floor poses alone (sitting between the heels, head on the
+    floor, tripod) that the G1 cannot reach but whose robot versions track (32 good). The policy cannot judge
+    fidelity, and 12-20 cm mean error is a visibly different motion.
+  - Floor sitting was environment contact (fixed the same day): generated "sitting on the floor" and "kneeling
+    upright" clips sink the tucked toes ~4 cm into the floor (ground estimate -3.8 to -4.5 cm; captured clips
+    -0.9 to +0.2), so the pelvis, thighs and knees rested 6-10 cm above the ground, past the 6 cm `envMinHeight`,
+    and the analysis put them on an invisible seat. Now a static part other than a foot within 12 cm of the ground
+    is floor support, and only higher parts can rest on the environment (real seats: 37-50 cm). Of the 66 generated
+    clips with environment flags, 27 lose them; 16 more accepted (all tracked, 0.93-0.99), none of them failing.
+    Chair, bench, box step-down and kneeling contact tests unchanged. On 18 captured BONES-SEED clips: box dips,
+    box jump, table and bench sitting keep their environment flags (parts at 35-87 cm); the captured floor sitting
+    that had them (6 of 10 cross-legged / on-heels loops: the same sunken toes, ground -3 to -12 cm) and a
+    hands-and-knees move (knees 8 cm over the toes) lose them.
+  - Not caught: holding a bridge on feet and shoulders (4 clips, accepted, always falls; start tilt 80°, hand load
+    0.65, waist torque 1.3x). No threshold separates them; torque ratios over 1x are common in tracked clips.
 
 ## 15. Open questions
 

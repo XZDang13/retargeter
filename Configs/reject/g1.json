@@ -19,7 +19,11 @@
     // zmp_outside). It was the only reason for 32 / 47 BONES-SEED rejects (29 / 23 DoF).
     { "metric": "unsupported_seconds",    "max": 0,    "severity": "warn", "precision": 0.01 },
     // Frames with a part below the local floor (feet 4 cm, limbs / trunk 8 cm; ContactConfig) for >= 25 ms.
-    { "metric": "penetration_frames",     "max": 0,    "severity": "reject" },
+    // A warning only (2026-11-20): it judges the source person's surface, and on 1,212 generated clips benchmarked
+    // with a tracking policy the 64 it alone rejected (lying, sitting and kneeling on the floor, often every frame)
+    // tracked well (51 at return >= 0.9, 12 at 0.7-0.9, 1 failed). The robot's own floor penetration
+    // (ground_penetration_max) still fails.
+    { "metric": "penetration_frames",     "max": 0,    "severity": "warn" },
     { "metric": "ground_tilt_deg",        "max": 2,    "severity": "warn" },
     // Mean root jerk over 4 s windows (m/s^3): ordinary jogging and dancing reach 50-120 (600 random SOMA clips:
     // p90 50, p99 94, max 122), so only far beyond that is it capture noise.
@@ -63,9 +67,11 @@
     // Warn on the top ~5 % (sample p90 0.15, p95 0.18); 0.10 warned on 30 % of clips.
     { "metric": "dyn_residual_p95",            "max": 0.20,  "severity": "warn" },
     // In flight (no ground contact) the residual is a CoM not falling ballistically, partly inherent to uniform
-    // scaling (~0.2 m·g); natural jumps 0.13-0.38 on the comparison and sample clips.
+    // scaling (~0.2 m·g); natural jumps 0.13-0.38 on the comparison and sample clips. Rejects from 0.8
+    // (2026-11-20, was 0.5): on 1,212 generated clips benchmarked with a tracking policy, those it alone flagged at
+    // 0.5-0.9 all tracked (return 0.87-0.93, no falls), and from 0.9 they fail (return 0.57-0.64; fast runs, jumps).
     { "metric": "dyn_flight_residual_max",     "max": 0.40,  "severity": "warn" },
-    { "metric": "dyn_flight_residual_max",     "max": 0.50,  "severity": "reject" },
+    { "metric": "dyn_flight_residual_max",     "max": 0.80,  "severity": "reject" },
     // ZMP outside the support, held 0.3 s (m). Sample p95 0.036, p99 0.053.
     { "metric": "zmp_outside_max",             "max": 0.06,  "severity": "warn" },
     { "metric": "zmp_outside_max",             "max": 0.08,  "severity": "reject" },

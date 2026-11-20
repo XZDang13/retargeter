@@ -167,9 +167,11 @@ public final class CausalContactTracker {
         }
         let zmp = moment / max(load, 0.5 * mass.reduce(0, +))
 
-        // Support hull: contacts and parts on the ground too fast for a contact (sliding feet), as offline.
+        // Support hull: contacts, parts on the ground too fast for a contact (sliding feet) and static parts resting on
+        // the floor, as offline.
         var groundPatch: [SIMD2<Float>] = []
-        for g in 0..<G where reported[g] || Double(height[g]) < c.hysteresis(groups.classes[g]).enterHeight {
+        for g in 0..<G where reported[g] || Double(height[g]) < c.hysteresis(groups.classes[g]).enterHeight
+            || (groups.classes[g] != .foot && Double(height[g]) <= c.envMinHeight && Double(filteredSpeed[g]) < c.envStaticSpeed) {
             groundPatch += patch(current, frame: 0, group: g, groups: groups, measures: [measures], c: c)
         }
         let outside = !flight && Double(distanceToHull(zmp, groundPatch)) > c.unsupportedMargin

@@ -33,7 +33,11 @@ public struct ContactConfig: Sendable {
 
     // Support / environment
     public var envStaticSpeed = 0.1
-    public var envMinHeight = 0.06
+    /// Height (m) over the ground from which a static part other than a foot can rest on the environment; below it
+    /// the part rests on the floor and is support. Generated floor sitting and kneeling sink the tucked toes ~4 cm
+    /// into the floor, which then sets the ground, while the pelvis, thighs and knees rest 6-10 cm above it; seats
+    /// are 35 cm and up.
+    public var envMinHeight = 0.12
     public var unsupportedMargin = 0.06
     /// A part can rest on the environment only where the body does not continue below it: its contact-patch vertices
     /// count as covered when a vertex of another group lies within `coverRadius` horizontally and more than
@@ -492,8 +496,24 @@ public enum ContactAnalysis {
 
         // Support: ZMP against the hull of the parts touching the ground: the contacts, and parts on the ground but too
         // fast for a contact (a sliding foot still carries weight: dance slides, sideways jog push-off).
+        // Static in 3D (lowest vertices slower than envStaticSpeed horizontally and vertically): horizontal speed
+        // alone let knees and thighs swinging up in a burpee kick-back count as resting.
+        func still(_ f: Int, _ g: Int) -> Bool {
+            guard Double(speed[f * G + g]) < c.envStaticSpeed else { return false }
+            let a = max(0, f - d), b = min(F - 1, f + d)
+            let lowest = measures[f][g].lowest
+            var dz: Float = 0
+            for v in lowest { dz += s.p(b, v).z - s.p(a, v).z }
+            let vertical = abs(dz) / Float(max(lowest.count, 1)) * Float(s.fps) / Float(max(b - a, 1))
+            return Double(vertical) < c.envStaticSpeed
+        }
+        // A static part other than a foot below envMinHeight rests on the floor (seated pelvis and thighs, kneeling
+        // knees a few cm over sunken toes).
+        func onFloor(_ f: Int, _ g: Int) -> Bool {
+            groups.classes[g] != .foot && Double(height[f * G + g]) <= c.envMinHeight && still(f, g)
+        }
         func touching(_ f: Int, _ g: Int) -> Bool {
-            contact[f * G + g] || Double(height[f * G + g]) < c.hysteresis(groups.classes[g]).enterHeight
+            contact[f * G + g] || Double(height[f * G + g]) < c.hysteresis(groups.classes[g]).enterHeight || onFloor(f, g)
         }
         // ZMP of the body parts as point masses (group centroids, de Leva fractions):
         //   p = Σ m_i [(g + z̈_i) r_i − z_i r̈_i] / Σ m_i (g + z̈_i).
@@ -534,16 +554,9 @@ public enum ContactAnalysis {
         // the support hull is supporting the body (feet: env support such as stairs; others: env contact).
         var envSupport = [Bool](repeating: false, count: F)
         var envContact = [Bool](repeating: false, count: F * G)
-        // Elevated and static in 3D: horizontal speed alone let knees and thighs swinging up in a burpee kick-back count.
+        // Elevated and static.
         func resting(_ f: Int, _ g: Int) -> Bool {
-            let elevated = Double(height[f * G + g]) > (groups.classes[g] == .foot ? c.terrainStep : c.envMinHeight)
-            guard elevated && Double(speed[f * G + g]) < c.envStaticSpeed else { return false }
-            let a = max(0, f - d), b = min(F - 1, f + d)
-            let lowest = measures[f][g].lowest
-            var dz: Float = 0
-            for v in lowest { dz += s.p(b, v).z - s.p(a, v).z }
-            let vertical = abs(dz) / Float(max(lowest.count, 1)) * Float(s.fps) / Float(max(b - a, 1))
-            return Double(vertical) < c.envStaticSpeed
+            Double(height[f * G + g]) > (groups.classes[g] == .foot ? c.terrainStep : c.envMinHeight) && still(f, g)
         }
         for f in 0..<F where unsupported[f] {
             var ground: [SIMD2<Float>] = []
